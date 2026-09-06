@@ -22,6 +22,8 @@ class ConsultAsideContractTest(unittest.TestCase):
         self.assertIn("references/runbook.md", skill)
         self.assertIn("references/after-advice.md", skill)
         self.assertIn("references/context-checklist.md", skill)
+        self.assertIn("OUTPOST_SECRET_SCAN", skill)
+        self.assertIn("no bypass flag", skill)
         self.assertLess(len(skill.splitlines()), 80)
         self.assertNotIn("run_agbrowse", skill)
         self.assertNotIn("ensure_outpost_chrome", skill)
@@ -52,6 +54,29 @@ class ConsultAsideContractTest(unittest.TestCase):
         self.assertIn("outpost-sessions.json", runbook)
         self.assertNotIn("contains `-work/`", runbook)
         self.assertNotIn("ChatGPT Work 프로젝트", runbook)
+        self.assertIn("OUTPOST_SECRET_SCAN", runbook)
+        self.assertIn("read-only", runbook)
+        self.assertIn("ID-bound", runbook)
+        self.assertIn("no `--allow-secrets`", runbook)
+        self.assertIn("user-owned tabs", runbook)
+        self.assertIn("MFA", runbook)
+        self.assertIn("CAPTCHA", runbook)
+        self.assertIn("rate limits", runbook)
+        self.assertIn("alternate sender", runbook)
+
+    def test_readme_documents_the_current_security_boundary(self) -> None:
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("visible ChatGPT web UI", readme)
+        self.assertIn("backend-api", readme)
+        self.assertIn("read-only", readme)
+        self.assertIn("ID-bound", readme)
+        self.assertIn("OUTPOST_SECRET_SCAN", readme)
+        self.assertIn("no bypass flag", readme)
+        self.assertIn("user-owned tabs", readme)
+        self.assertIn("MFA", readme)
+        self.assertIn("CAPTCHA", readme)
+        self.assertIn("rate limits", readme)
+        self.assertNotIn("does not use private ChatGPT endpoints", readme)
 
     def test_inner_skill_fails_closed_outside_work(self) -> None:
         skill = (

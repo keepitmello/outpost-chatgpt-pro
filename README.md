@@ -61,4 +61,24 @@ Playwright is not an automatic sender.
 
 ## Security boundary
 
-The skill automates the visible ChatGPT web UI. It does not use private ChatGPT endpoints, extract cookies or tokens, bypass access controls, or bundle browser credentials. Never put secrets, private keys, customer data, or unnecessary personal data in an outpost packet.
+`outpost send` submits only through the visible ChatGPT web UI (composer,
+file chip, and send control). It does not extract or persist cookies or
+tokens outside the live browser process, bypass access controls,
+automatically resend, or bundle browser
+credentials.
+
+After this process attempts submission, recovery may issue read-only
+ChatGPT `backend-api` GETs in the live Aside session to see whether this
+run's ID-bound user turn committed. Attachment retrieval through
+`backend-api/files` happens only after that user-message ID is observed.
+The session token is not logged or written to outputs. Recovery does not
+write to the backend.
+
+Outpost does not export cookies or tokens, alter user-owned tabs or
+conversations, automate login, MFA, or CAPTCHA, evade rate limits, rotate
+accounts, or use another run's conversation. An uncertain submission is
+never handed to an alternate sender.
+
+High-confidence credentials in `packet.md` are refused before Aside starts
+(`OUTPOST_SECRET_SCAN`, exit 2). There is no bypass flag. Never put secrets,
+private keys, customer data, or unnecessary personal data in an outpost packet.

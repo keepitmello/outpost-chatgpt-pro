@@ -32,8 +32,9 @@ Write `.outpost/<run>/packet.md`. The first line is one Markdown H1 with only
 the subject (`# <title>`). Do not add task framing such as `Outpost`,
 `review request`, `검토`, `리뷰 요청`, or `분석 요청`. Include the evidence,
 constraints, failed attempts, and acceptance criteria that can change the
-answer. Scan for secrets. Ask for a natural Korean report; leave structure
-and terms to the consultant.
+answer. The engine refuses high-confidence credentials before Aside (exit
+`2`, `OUTPOST_SECRET_SCAN`) and has no bypass flag. Ask for a natural
+Korean report; leave structure and terms to the consultant.
 
 For a zip artifact, add `--artifact .outpost/<run>/artifact.zip`.
 

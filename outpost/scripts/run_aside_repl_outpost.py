@@ -195,7 +195,21 @@ def load_sessions_module():
     return module
 
 
+def load_secret_scan_module():
+    spec = importlib.util.spec_from_file_location(
+        "outpost_secret_scan",
+        Path(__file__).with_name("secret_scan.py"),
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("secret_scan.py is missing")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 SESSIONS = load_sessions_module()
+SECRET_SCAN = load_secret_scan_module()
 
 
 class SubmitUnknownError(RuntimeError):
@@ -2116,6 +2130,10 @@ def main(argv: Sequence[str]) -> int:
     if not raw_body.strip():
         print("packet is empty", file=sys.stderr)
         return 2
+    secret_findings = SECRET_SCAN.scan_packet_text(raw_body)
+    if secret_findings:
+        print(SECRET_SCAN.format_findings(secret_findings), end="", file=sys.stderr)
+        return SECRET_SCAN.EXIT_CODE
     try:
         topic = extract_topic(raw_body)
     except ValueError as exc:

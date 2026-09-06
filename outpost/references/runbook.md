@@ -19,6 +19,28 @@ lifecycle, and recovery. There is no automatic alternate sender.
   without inventing one. Do not prefix or suffix task framing such as
   `Outpost`, `review request`, `검토`, `리뷰 요청`, or `분석 요청`.
 
+## Security boundary
+
+The runner scans `--packet` after a nonempty read and before topic
+extraction or `ensure_aside_daemon`. A high-confidence credential match
+prints `OUTPOST_SECRET_SCAN`, the rule name, `line:column`, and a static
+hint, then exits `2`. It never echoes the match or its length, never
+mutates the packet, and has no `--allow-secrets` flag.
+
+Submission uses only the visible ChatGPT composer and send control.
+After this process attempts submission, recovery may issue read-only
+`backend-api` GETs with the live Aside session to see whether this run's
+ID-bound user turn committed. Attachment download through
+`backend-api/files` happens only after that user-message ID is observed.
+The session token is not persisted, logged, or written to outputs.
+Recovery does not bypass auth, write to the backend, or resend
+automatically.
+
+The runner never exports cookies or tokens, alters user-owned tabs or
+conversations, automates login, MFA, or CAPTCHA, evades rate limits,
+rotates accounts, or uses another run's conversation. An uncertain
+submission is never handed to an alternate sender.
+
 If the Aside account skill is missing, run:
 
 ```bash
