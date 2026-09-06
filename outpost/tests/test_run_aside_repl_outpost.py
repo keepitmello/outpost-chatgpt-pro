@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -311,6 +312,47 @@ class AsideReplConsultTest(unittest.TestCase):
                 )
         self.assertEqual(result, 2)
 
+    def test_main_refuses_secrets_before_aside_without_mutating_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = root / "aside"
+            fake.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+            fake.chmod(0o755)
+            secret = "sk-proj-" + ("D" * 24)
+            packet = root / "packet.md"
+            original = "# Test topic\n\n" + secret + "\n"
+            packet.write_text(original, encoding="utf-8")
+            path = f"{temp}{os.pathsep}{os.environ.get('PATH', '')}"
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                with mock.patch.object(MODULE, "extract_topic") as extract:
+                    with mock.patch.object(MODULE, "ensure_aside_daemon") as daemon:
+                        with mock.patch.object(MODULE, "run_repl_outpost") as runner:
+                            with mock.patch.object(MODULE, "run_repl_process") as process:
+                                with mock.patch("sys.stderr", new_callable=lambda: __import__("io").StringIO()) as err:
+                                    result = MODULE.main(
+                                        [
+                                            "--quality", "xhigh",
+                                            "--packet", str(packet),
+                                            "--url", "https://chatgpt.com/g/g-p-test-work/project",
+                                        ]
+                                    )
+                                    leftover = packet.read_text(encoding="utf-8")
+        report = err.getvalue()
+        self.assertEqual(result, 2)
+        self.assertIn(MODULE.SECRET_SCAN.MARKER, report)
+        self.assertIn("openai-key", report)
+        self.assertNotIn(secret, report)
+        self.assertNotIn(str(len(secret)), report)
+        self.assertEqual(leftover, original)
+        extract.assert_not_called()
+        daemon.assert_not_called()
+        runner.assert_not_called()
+        process.assert_not_called()
+        with self.assertRaises(SystemExit):
+            MODULE.parse_args(
+                ["--quality", "xhigh", "--packet", "p", "--allow-secrets"]
+            )
+
     def test_main_returns_75_when_daemon_unreachable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -513,6 +555,126 @@ print('ASIDE_REPL_RESPONSE_RESULT {"responseText":"no id here","idMatched":false
             timeout_ms=90000,
         )
         self.assertIn("Date.now() + 90000", long_script)
+        self.assertNotRegex(script, r"method:\s*['\"](?:POST|PUT|PATCH|DELETE)['\"]")
+        self.assertNotIn("console.log(sess", script)
+        self.assertNotIn("accessToken,", script)
+        self.assertIn("backend-api/files/", script)
+        self.assertLess(script.index("function userHasId"), script.index("backend-api/files/"))
+        self.assertIn("if (!userFound) return { text: '', finished: false, writingBlocks: null, attachments: null }", script)
+
+    def test_assistant_payload_hides_attachments_until_user_id_is_observed(self) -> None:
+        payload = {
+            "mapping": {
+                "u": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"parts": ["ID: other-run\nQ"]},
+                        "create_time": 1,
+                    }
+                },
+                "a": {
+                    "message": {
+                        "author": {"role": "assistant"},
+                        "content": {"parts": ["hello"]},
+                        "status": "finished_successfully",
+                        "create_time": 2,
+                        "end_turn": True,
+                        "metadata": {"attachments": [{"id": "file-1", "name": "out.zip"}]},
+                    }
+                },
+            }
+        }
+        hidden = MODULE.assistant_from_conversation_payload(payload, "abc123")
+        self.assertEqual(hidden["text"], "")
+        self.assertIsNone(hidden["attachments"])
+        visible = MODULE.assistant_from_conversation_payload(
+            {
+                "mapping": {
+                    "u": {
+                        "message": {
+                            "author": {"role": "user"},
+                            "content": {"parts": ["ID: abc123\nQ"]},
+                            "create_time": 1,
+                        },
+                        "children": ["a"],
+                    },
+                    "a": payload["mapping"]["a"],
+                }
+            },
+            "abc123",
+        )
+        self.assertEqual(visible["text"], "hello")
+        self.assertEqual(visible["attachments"][0]["id"], "file-1")
+
+    def test_backend_recovery_executes_only_get_requests(self) -> None:
+        conversation_url = (
+            "https://chatgpt.com/c/6a95625e-1f78-83e8-aa90-a49f982e36ef"
+        )
+        script = MODULE.build_backend_recovery_script("abc123", conversation_url)
+        harness = f"""
+const requests = [];
+globalThis.openTab = async () => ({{ waitForLoadState: async () => {{}} }});
+globalThis.closeTab = async () => {{}};
+globalThis.sleep = async () => {{}};
+globalThis.fetch = async (url, options = {{}}) => {{
+  const value = String(url);
+  requests.push({{ url: value, method: String(options.method || 'GET').toUpperCase() }});
+  if (value.endsWith('/api/auth/session')) {{
+    return {{ ok: true, json: async () => ({{ accessToken: 'runtime-secret' }}) }};
+  }}
+  if (value.includes('/backend-api/conversation/')) {{
+    return {{ ok: true, json: async () => ({{
+      current_node: 'a',
+      mapping: {{
+        u: {{
+          message: {{
+            author: {{ role: 'user' }},
+            content: {{ parts: ['ID: abc123'] }},
+            create_time: 1
+          }},
+          children: ['a']
+        }},
+        a: {{
+          message: {{
+            author: {{ role: 'assistant' }},
+            content: {{ parts: ['done'] }},
+            status: 'finished_successfully',
+            end_turn: true,
+            create_time: 2,
+            metadata: {{ attachments: [{{ id: 'file-1', name: 'result.bin' }}] }}
+          }}
+        }}
+      }}
+    }}) }};
+  }}
+  if (value.includes('/backend-api/files/file-1/download')) {{
+    return {{ ok: true, json: async () => ({{ download_url: 'https://files.example/result.bin' }}) }};
+  }}
+  if (value === 'https://files.example/result.bin') {{
+    return {{ ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer }};
+  }}
+  throw new Error('unexpected fetch ' + value);
+}};
+(async () => {{
+{script}
+  if (requests.some((request) => request.method !== 'GET')) {{
+    throw new Error(JSON.stringify(requests));
+  }}
+  if (!requests.some((request) => request.url.includes('/backend-api/files/'))) {{
+    throw new Error('attachment retrieval was not exercised');
+  }}
+}})().catch((error) => {{
+  console.error(error);
+  process.exit(1);
+}});
+"""
+        completed = subprocess.run(
+            ["node", "-e", harness],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_daemon_loss_recovers_from_backend_instead_of_resend(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -872,27 +1034,32 @@ print('ASIDE_REPL_RESPONSE_RESULT {{"responseText":"ID: placeholder","artifact":
             )
             response_path = root / "response.md"
             result_path = root / "recovered.json"
+            planted = "sess.accessToken.should.not.leak"
             with mock.patch.object(MODULE, "ensure_aside_daemon", return_value=None):
-                with mock.patch.object(
-                    MODULE,
-                    "recover_outpost_from_backend",
-                    return_value={
-                        "ok": True,
-                        "responseText": "recovered later",
-                        "finished": True,
-                        "idMatched": True,
-                        "conversationUrl": "https://chatgpt.com/c/1",
-                    },
-                ) as recover:
-                    result = MODULE.main(
-                        [
-                            "--recover-from", str(evidence),
-                            "--response-output", str(response_path),
-                            "--json-output", str(result_path),
-                            "--stderr-output", str(root / "stderr.log"),
-                        ]
-                    )
+                with mock.patch.object(MODULE, "run_repl_outpost") as resend:
+                    with mock.patch.object(
+                        MODULE,
+                        "recover_outpost_from_backend",
+                        return_value={
+                            "ok": True,
+                            "responseText": "recovered later",
+                            "finished": True,
+                            "idMatched": True,
+                            "conversationUrl": "https://chatgpt.com/c/1",
+                            "accessToken": planted,
+                            "Authorization": f"Bearer {planted}",
+                        },
+                    ) as recover:
+                        result = MODULE.main(
+                            [
+                                "--recover-from", str(evidence),
+                                "--response-output", str(response_path),
+                                "--json-output", str(result_path),
+                                "--stderr-output", str(root / "stderr.log"),
+                            ]
+                        )
             recover.assert_called_once()
+            resend.assert_not_called()
             self.assertEqual(recover.call_args.args[0], "abc123")
             self.assertEqual(result, 0)
             self.assertEqual(response_path.read_text(encoding="utf-8"), "recovered later\n")
@@ -900,6 +1067,10 @@ print('ASIDE_REPL_RESPONSE_RESULT {{"responseText":"ID: placeholder","artifact":
             self.assertTrue(saved["ok"])
             self.assertTrue(saved["recoveredFromBackend"])
             self.assertEqual(saved["id"], "abc123")
+            blob = response_path.read_text(encoding="utf-8") + result_path.read_text(encoding="utf-8")
+            self.assertNotIn("accessToken", blob)
+            self.assertNotIn(planted, blob)
+            self.assertNotIn("Authorization", blob)
 
     def test_list_and_thread_flags_are_parseable(self) -> None:
         listed = MODULE.parse_args(["--list"])
