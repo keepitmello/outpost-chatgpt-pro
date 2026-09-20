@@ -233,7 +233,11 @@ class AsideReplConsultTest(unittest.TestCase):
         self.assertIn("[0-9]* ?Pro", script)
         self.assertIn("preferredModel", script)
         self.assertIn("modelRadios", script)
-        self.assertIn("tierFallback", script)
+        # doctor probes the same lookup send uses; no click fallback may cover
+        # for a failed name lookup and report a green light send cannot reach
+        self.assertIn("waitNamedRef(page, 'button', tierNameRe", script)
+        self.assertNotIn("tierFallback", script)
+        self.assertNotIn("menus.nth(", script)
         self.assertNotIn("insertText", script)
         self.assertNotIn("setInputFiles", script)
         self.assertNotIn("composer-submit-button", script)

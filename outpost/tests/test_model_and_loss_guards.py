@@ -172,12 +172,30 @@ class ModelAndLossGuardTest(unittest.TestCase):
             response_timeout_ms=1000,
         )
         self.assertIn("async function primeRoles(target)", script)
-        self.assertIn("waitRole(workPage, 'button', tierNameRe", script)
+        self.assertIn("waitNamedRef(workPage, 'button', tierNameRe", script)
         self.assertIn("waitRole(workPage, 'menuitem', '성능'", script)
-        self.assertIn("waitRole(workPage, 'menuitemradio', modelNameRe", script)
+        self.assertIn("waitNamedRef(workPage, 'menuitemradio', modelNameRe", script)
         self.assertIn("waitRole(workPage, 'group', attachmentName", script)
         # a bare role lookup before the first snapshot silently matches nothing
         self.assertNotIn("workPage.getByRole('heading'", script.split("await primeRoles")[0])
+
+    def test_no_regexp_name_reaches_get_by_role(self) -> None:
+        # getByRole(role, {name}) silently matches nothing when the name is a
+        # RegExp, and it never sees a name that comes from the element's own
+        # text. Both the Pro pill and the model radios are named by their text,
+        # so a RegExp handed to a role lookup kills the send without a word.
+        script = MODULE.build_repl_script(
+            project_url="https://chatgpt.com/g/g-p-test-work/project",
+            quality="pro",
+            packet_name="packet.md",
+            packet_base64="cGFja2V0",
+            topic="t",
+            outpost_id="abc123",
+            response_timeout_ms=1000,
+        )
+        self.assertNotIn("name: /", script)
+        self.assertNotIn("waitRole(workPage, 'button', tierNameRe", script)
+        self.assertNotIn("waitRole(workPage, 'menuitemradio', modelNameRe", script)
 
     def test_a_project_page_that_will_not_render_is_named(self) -> None:
         script = MODULE.build_repl_script(

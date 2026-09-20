@@ -222,14 +222,27 @@ stores it as `modelSlug` in `result.json`. A different slug still saves
 Observed slugs: `매우 높음` -> `gpt-5-6-thinking`, `Pro` + `최신` ->
 `gpt-6-pro`. That is why `xhigh` was removed instead of relabelled.
 
-## Aside role lookups need a snapshot first
+## Aside role lookups: snapshot first, string name only
 
 `getByRole` resolves against the index Aside builds inside `snapshot()`. On a
 page that was never snapshotted in the current REPL session it returns zero
-matches, including for elements that have an explicit `aria-label`. Every role
-lookup in the runner goes through `waitRole()`, which snapshots and then
-queries, and the doctor script snapshots before each role probe. A missing tier
-pill is therefore a real UI change, not a priming artifact.
+matches, including for elements that have an explicit `aria-label`.
+
+Two more limits sit on top of that, and both fail silently:
+
+- **The `name` must be a string.** Hand it a `RegExp` and it returns zero
+  matches with no error. The tier pill and the model radio were both probed
+  this way, so every send died at `select-tier` while `doctor` stayed green.
+- **Only the `aria-label` counts as a name.** An element named by its own text
+  — the Pro pill (`6 Pro`), the model radios (`최신`) — is invisible to it.
+
+String names go through `waitRole()`. Pattern names and text-named elements go
+through `waitNamedRef()`, which reads the computed name off the `snapshot()`
+tree (`- button "6 Pro" [ref=e66]`) and returns the ref locator. `doctor` probes
+the tier pill with `waitNamedRef()`, the same lookup `send` uses, so its green
+light cannot come from a path the send does not have. When a role probe misses,
+check the name's type and the element's `aria-label` before calling it a UI
+change.
 
 ## Nothing is lost after the send
 
