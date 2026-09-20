@@ -54,7 +54,15 @@ PREFERRED_MODEL_RADIO = "최신"
 FORBIDDEN_MODEL_RADIOS = ("GPT-5.6 Sol", "5.6 Sol")
 # The only model an outpost turn may run on. The picker label is a moving
 # alias, so the run is judged by the slug ChatGPT reports for the answer.
-REQUIRED_MODEL_SLUG = "gpt-6-pro"
+# Each quality is one tier pick, and each tier runs one model. ChatGPT reports
+# the slug it actually ran, so a run checks that slug against the tier it asked
+# for. `pro` is the paid GPT-6 tier; `xhigh` is ChatGPT's `매우 높음`, which runs
+# GPT-5.6 — cheaper to spend, and never what a Pro packet should be answered by.
+QUALITY_MODEL_SLUGS: dict[str, str] = {
+    "pro": "gpt-6-pro",
+    "xhigh": "gpt-5-6-thinking",
+}
+QUALITIES = tuple(QUALITY_MODEL_SLUGS)
 WRONG_MODEL_EXIT = 78
 DUPLICATE_SEND_EXIT = 79
 DEFAULT_TIER_ALIASES = (
@@ -897,12 +905,16 @@ def confirm_model_slug(
     return str((payload or {}).get("modelSlug") or "")
 
 
-def wrong_model_message(observed: str, response_path: Path) -> str:
+def required_model_slug(quality: str | None) -> str:
+    return QUALITY_MODEL_SLUGS.get(str(quality or ""), QUALITY_MODEL_SLUGS["pro"])
+
+
+def wrong_model_message(observed: str, response_path: Path, required: str) -> str:
     return (
-        f"OUTPOST_WRONG_MODEL required={REQUIRED_MODEL_SLUG} "
+        f"OUTPOST_WRONG_MODEL required={required} "
         f"observed={observed or 'unknown'} response={response_path}\n"
-        "답변은 저장했지만 요청한 모델이 아닙니다. ChatGPT 모델 피커 계약을 "
-        "다시 확인하세요 (outpost doctor)."
+        "답변은 저장했지만 그 품질이 돌리는 모델이 아닙니다. ChatGPT 피커 "
+        "계약을 다시 확인하세요 (outpost doctor)."
     )
 
 
@@ -954,9 +966,9 @@ def build_repl_script(
     uploads: Sequence[dict[str, str]] | None = None,
 ) -> str:
     picker = picker or load_picker_contract()
-    if quality != "pro":
-        raise ValueError("outpost only runs the Pro tier")
-    target_label = picker["proLabel"]
+    target_label = str(picker.get(f"{quality}Label") or "").strip()
+    if not target_label:
+        raise ValueError(f"picker contract has no tier label for quality {quality}")
     target_model = str(picker.get("modelRadio") or PREFERRED_MODEL_RADIO)
     tier_pattern = tier_name_pattern(picker.get("tierAliases") or DEFAULT_TIER_ALIASES)
     model_pattern = r"^" + re.escape(target_model) + r"$"
@@ -1988,7 +2000,7 @@ def run_doctor(args: argparse.Namespace) -> int:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--quality", choices=("pro",))
+    parser.add_argument("--quality", choices=QUALITIES)
     parser.add_argument("--packet")
     parser.add_argument("--url", default=None)
     parser.add_argument("--project", default=None)
@@ -2180,6 +2192,7 @@ def recover_from_saved_state(args: argparse.Namespace) -> int:
     if not outpost_id:
         print("recover-from is missing outpost id", file=sys.stderr)
         return 2
+    required_slug = required_model_slug(evidence.get("quality"))
     daemon_error = ensure_aside_daemon()
     if daemon_error is not None:
         print(daemon_error, file=sys.stderr)
@@ -2208,14 +2221,14 @@ def recover_from_saved_state(args: argparse.Namespace) -> int:
         response_text = str(recovered["responseText"]) + format_attachments_section(saved_paths)
         response_path.write_text(response_text + "\n", encoding="utf-8")
         saved = {
-            "ok": str(recovered.get("modelSlug") or "") == REQUIRED_MODEL_SLUG,
+            "ok": str(recovered.get("modelSlug") or "") == required_slug,
             "id": outpost_id,
             "topic": evidence.get("topic") or "",
             "quality": evidence.get("quality") or args.quality or "",
             "model": str(recovered.get("modelSlug") or "") or evidence.get("model") or "",
             "modelSlug": str(recovered.get("modelSlug") or ""),
-            "modelOk": str(recovered.get("modelSlug") or "") == REQUIRED_MODEL_SLUG,
-            "requiredModel": REQUIRED_MODEL_SLUG,
+            "modelOk": str(recovered.get("modelSlug") or "") == required_slug,
+            "requiredModel": required_slug,
             "tier": evidence.get("tier") or "",
             "conversationUrl": recovered.get("conversationUrl") or conversation_url,
             "conversationId": recovered.get("conversationId") or evidence.get("conversationId") or "",
@@ -2249,8 +2262,11 @@ def recover_from_saved_state(args: argparse.Namespace) -> int:
             for p in saved_paths:
                 print(f"  - {p}", flush=True)
         recovered_state_slug = str(recovered.get("modelSlug") or "")
-        if recovered_state_slug != REQUIRED_MODEL_SLUG:
-            print(wrong_model_message(recovered_state_slug, response_path), file=sys.stderr)
+        if recovered_state_slug != required_slug:
+            print(
+                wrong_model_message(recovered_state_slug, response_path, required_slug),
+                file=sys.stderr,
+            )
             return WRONG_MODEL_EXIT
         print(
             f"OUTPOST_COMPLETE response={response_path} model={recovered_state_slug}",
@@ -2415,7 +2431,7 @@ def main(argv: Sequence[str]) -> int:
         "id": outpost_id,
         "topic": topic,
         "quality": args.quality,
-        "requiredModel": REQUIRED_MODEL_SLUG,
+        "requiredModel": required_model_slug(args.quality),
         "packetPath": packet_source,
         "packetSha": packet_sha,
         "responseOutput": str(response_path),
@@ -2540,7 +2556,7 @@ def main(argv: Sequence[str]) -> int:
             response_path.write_text(response_text + "\n", encoding="utf-8")
             stderr_path.write_text(exc.transcript, encoding="utf-8")
             recovered_slug = str(recovered.get("modelSlug") or "")
-            recovered_model_ok = recovered_slug == REQUIRED_MODEL_SLUG
+            recovered_model_ok = recovered_slug == required_model_slug(args.quality)
             recovered_evidence = attach_thread_fields(
                 {
                     "ok": recovered_model_ok,
@@ -2550,7 +2566,7 @@ def main(argv: Sequence[str]) -> int:
                     "model": recovered_slug or submitted.get("model") or "",
                     "modelSlug": recovered_slug,
                     "modelOk": recovered_model_ok,
-                    "requiredModel": REQUIRED_MODEL_SLUG,
+                    "requiredModel": required_model_slug(args.quality),
                     "tier": submitted.get("tier") or "",
                     "conversationUrl": persisted_conversation_url(
                         recovered.get("conversationUrl"),
@@ -2598,7 +2614,12 @@ def main(argv: Sequence[str]) -> int:
                 for p in saved_paths:
                     print(f"  - {p}", flush=True)
             if not recovered_model_ok:
-                print(wrong_model_message(recovered_slug, response_path), file=sys.stderr)
+                print(
+                    wrong_model_message(
+                        recovered_slug, response_path, required_model_slug(args.quality)
+                    ),
+                    file=sys.stderr,
+                )
                 return WRONG_MODEL_EXIT
             print(
                 f"OUTPOST_COMPLETE response={response_path} model={recovered_slug}",
@@ -2753,7 +2774,8 @@ def main(argv: Sequence[str]) -> int:
     )
     if not model_slug:
         model_slug = confirm_model_slug(outpost_id, conversation_for_check or None)
-    model_ok = model_slug == REQUIRED_MODEL_SLUG
+    required_slug = required_model_slug(args.quality)
+    model_ok = model_slug == required_slug
     evidence = attach_thread_fields(
         {
             "ok": model_ok,
@@ -2763,7 +2785,7 @@ def main(argv: Sequence[str]) -> int:
             "model": model_slug or submit_payload["model"],
             "modelSlug": model_slug,
             "modelOk": model_ok,
-            "requiredModel": REQUIRED_MODEL_SLUG,
+            "requiredModel": required_slug,
             "tier": submit_payload["tier"],
             "conversationUrl": persisted_conversation_url(
                 submit_payload.get("conversationUrl"),
@@ -2813,7 +2835,7 @@ def main(argv: Sequence[str]) -> int:
         for p in saved_paths:
             print(f"  - {p}", flush=True)
     if not model_ok:
-        print(wrong_model_message(model_slug, response_path), file=sys.stderr)
+        print(wrong_model_message(model_slug, response_path, required_slug), file=sys.stderr)
         return WRONG_MODEL_EXIT
     print(
         f"OUTPOST_COMPLETE response={response_path} model={model_slug}",

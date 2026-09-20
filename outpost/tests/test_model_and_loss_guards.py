@@ -38,7 +38,14 @@ class ModelAndLossGuardTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def _run(self, root: Path, slug: str, *, body: str = "# Topic\n\nquestion") -> tuple[int, Path, Path]:
+    def _run(
+        self,
+        root: Path,
+        slug: str,
+        *,
+        quality: str = "pro",
+        body: str = "# Topic\n\nquestion",
+    ) -> tuple[int, Path, Path]:
         sentinel = root / "aside-ran"
         fake = root / "aside"
         fake.write_text(
@@ -56,7 +63,7 @@ class ModelAndLossGuardTest(unittest.TestCase):
                 with mock.patch.object(MODULE, "recover_outpost_from_backend", return_value=None):
                     code = MODULE.main(
                         [
-                            "--quality", "pro",
+                            "--quality", quality,
                             "--packet", str(packet),
                             "--url", "https://chatgpt.com/g/g-p-test-work/project",
                             "--response-output", str(response_path),
@@ -66,7 +73,15 @@ class ModelAndLossGuardTest(unittest.TestCase):
                     )
         return code, result_path, sentinel
 
-    def test_a_model_other_than_gpt_6_pro_fails_the_run(self) -> None:
+    def test_each_quality_expects_exactly_one_model(self) -> None:
+        self.assertEqual(tuple(MODULE.QUALITIES), ("pro", "xhigh"))
+        self.assertEqual(MODULE.required_model_slug("pro"), "gpt-6-pro")
+        self.assertEqual(MODULE.required_model_slug("xhigh"), "gpt-5-6-thinking")
+        # recover reads the quality off the saved evidence, so an old xhigh run
+        # keeps expecting the tier it was sent to
+        self.assertEqual(MODULE.required_model_slug("xhigh"), MODULE.QUALITY_MODEL_SLUGS["xhigh"])
+
+    def test_a_model_other_than_the_quality_asked_for_fails_the_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             code, result_path, _sentinel = self._run(root, "gpt-5-6-thinking")
@@ -78,6 +93,27 @@ class ModelAndLossGuardTest(unittest.TestCase):
             self.assertEqual(evidence["requiredModel"], "gpt-6-pro")
             # the answer is still saved, so quota is never silently thrown away
             self.assertIn("answer", (root / "response.md").read_text(encoding="utf-8"))
+
+    def test_xhigh_passes_on_gpt_5_6_thinking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            code, result_path, _sentinel = self._run(
+                root, "gpt-5-6-thinking", quality="xhigh"
+            )
+            self.assertEqual(code, 0)
+            evidence = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertTrue(evidence["modelOk"])
+            self.assertEqual(evidence["quality"], "xhigh")
+            self.assertEqual(evidence["requiredModel"], "gpt-5-6-thinking")
+
+    def test_xhigh_on_the_pro_model_fails_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            code, result_path, _sentinel = self._run(root, "gpt-6-pro", quality="xhigh")
+            self.assertEqual(code, MODULE.WRONG_MODEL_EXIT)
+            evidence = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertFalse(evidence["modelOk"])
+            self.assertEqual(evidence["requiredModel"], "gpt-5-6-thinking")
 
     def test_gpt_6_pro_passes_and_records_the_server_slug(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

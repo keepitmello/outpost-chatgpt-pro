@@ -35,11 +35,9 @@ class AsideReplConsultTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             MODULE.parse_args([])
         self.assertEqual(MODULE.parse_args(["--quality", "pro", "--packet", "p"]).quality, "pro")
-        with self.assertRaises(SystemExit):
-            MODULE.parse_args(["--quality", "xhigh", "--packet", "p"])
-        self.assertEqual(MODULE.parse_args(["--quality", "pro", "--packet", "p"]).quality, "pro")
-        with self.assertRaises(SystemExit):
-            MODULE.parse_args(["--quality", "xhigh", "--packet", "p"])
+        self.assertEqual(
+            MODULE.parse_args(["--quality", "xhigh", "--packet", "p"]).quality, "xhigh"
+        )
         with self.assertRaises(SystemExit):
             MODULE.parse_args(["--quality", "high", "--packet", "p"])
 
