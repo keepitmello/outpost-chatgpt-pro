@@ -49,7 +49,8 @@ Known project-home path:
 1. Navigate directly to the supplied project URL. Ignore temporary/global
    Chat tabs rather than repairing them.
 2. Require page title `ChatGPT - <PROJECT>`, heading `<PROJECT>`, and textbox
-   `<PROJECT>에서 새 채팅`. These three signals prove the project-owned composer.
+   `<PROJECT>의 새 채팅` (older UI: `<PROJECT>에서 새 채팅`). These three signals
+   prove the project-owned composer.
 3. Switch the banner to Chat before touching the picker. Work mode replaces
    the Chat picker with a Work-mode model/Fast control; do not operate that UI.
 4. The project-home Chat composer starts a new project conversation. Do not
@@ -63,7 +64,7 @@ Both qualities require:
 - Surface: **Chat**
 - Model: **최신** checked
 
-Quality mapping on the Chat slider (`즉시` `중간` `높음` `매우 높음` `Pro`):
+Quality mapping on the Chat slider (`Instant` `Medium` `High` `Extra High` `Pro`):
 
 - `pro`: **Pro**
 
@@ -71,10 +72,10 @@ If the family or requested tier cannot be verified, stop before send.
 
 Known picker path:
 
-1. Open the current Chat tier button once (`즉시`/`중간`/`높음`/`매우 높음`/`Pro`,
-   quota-prefixed `NPro`/`N Pro`, or `추론 수준`).
+1. Open the Chat tier button once. Its accessible name is `ChatGPT 모델 선택`;
+   its text is the current tier.
 2. In the simple tier view, read the current `N개 중 M번째` index.
-3. Focus the `성능` menuitem and move with `ArrowLeft`/`ArrowRight` until
+3. Focus the `파워` menuitem (older UI: `성능`) and move with `ArrowLeft`/`ArrowRight` until
    the label is `Pro`.
 4. Require that label at `N개 중 M번째`. Do not keep probing after that label.
 5. Only after the tier is verified, open `모델 선택` and require the checked

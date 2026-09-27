@@ -119,7 +119,10 @@ class AsideReplConsultTest(unittest.TestCase):
                     ),
                     "예창패",
                 )
-        self.assertEqual(MODULE.composer_aria_label("Shopping"), "Shopping에서 새 채팅")
+        self.assertEqual(
+            MODULE.composer_aria_labels("Shopping"),
+            ["Shopping의 새 채팅", "Shopping에서 새 채팅"],
+        )
         shopping = MODULE.build_repl_script(
             project_url="https://chatgpt.com/g/g-p-test-shopping/project",
             project_name="Shopping",
@@ -131,11 +134,12 @@ class AsideReplConsultTest(unittest.TestCase):
             response_timeout_ms=1000,
         )
         self.assertIn(
-            """#prompt-textarea[contenteditable="true"][aria-label="' + composerLabel + '"]""",
+            MODULE.js(MODULE.composer_selector(MODULE.composer_aria_labels("Shopping"))),
             shopping,
         )
         self.assertNotIn(".and(", shopping)
-        self.assertIn("Shopping에서 새 채팅", shopping)
+        self.assertIn("Shopping의 새 채팅", shopping)
+        self.assertNotIn("Work의 새 채팅", shopping)
         self.assertNotIn("Work에서 새 채팅", shopping)
         self.assertIn("project composer not visible", shopping)
 
@@ -165,8 +169,20 @@ class AsideReplConsultTest(unittest.TestCase):
         self.assertIn("verifiedTier", pro)
         self.assertIn("^최신$", pro)
         self.assertIn("targetModel", pro)
-        self.assertIn('var targetLabel = "Pro"', pro)
-        self.assertIn('var targetLabel = "Pro"', pro)
+        self.assertIn('var targetLabels = ["Pro"]', pro)
+        xhigh = MODULE.build_repl_script(
+            project_url="https://chatgpt.com/g/g-p-test-work/project",
+            quality="xhigh",
+            packet_name="packet.md",
+            packet_base64="cGFja2V0",
+            topic="t",
+            outpost_id="abc123",
+            response_timeout_ms=1000,
+            picker=MODULE.default_picker_contract(),
+        )
+        # ChatGPT has named the xhigh stop in both languages; either verifies it.
+        self.assertIn('var targetLabels = ["Extra High", "매우 높음"]', xhigh)
+        self.assertNotIn('"Pro"]', xhigh.split("var targetLabels = ")[1].split("\n")[0])
         self.assertIn("[0-9]* ?Pro", pro)
         self.assertIn("tier button not visible", pro)
         self.assertNotIn("매우 높음|Pro)$", pro)
@@ -216,17 +232,17 @@ class AsideReplConsultTest(unittest.TestCase):
         self.assertIn("name: packetName", pro)
         self.assertIn("setInputFiles([{", pro)
         self.assertNotIn("setInputFiles(packetPath)", pro)
-        self.assertIn('#prompt-textarea[contenteditable="true"]', pro)
         self.assertNotIn(".and(", pro)
-        self.assertIn("Work에서 새 채팅", pro)
+        self.assertIn("Work의 새 채팅", pro)
         self.assertIn("project composer not visible", pro)
         self.assertIn("composer.press('Meta+A')", pro)
         self.assertIn("composer.press('Backspace')", pro)
         self.assertIn("keyboard.insertText(composerPrompt)", pro)
         self.assertIn("Array.from(el.children)", pro)
         self.assertIn("composerValue !== composerPrompt", pro)
+        # send waits for an enabled button, whichever name the UI gives it
         self.assertIn(
-            '#composer-submit-button:not(:disabled):not([aria-disabled="true"]):not([data-visually-disabled])',
+            ':not(:disabled):not([aria-disabled="true"]):not([data-visually-disabled])',
             pro,
         )
         self.assertIn("#upload-files", pro)
@@ -268,7 +284,7 @@ class AsideReplConsultTest(unittest.TestCase):
             project_name="Work",
         )
         self.assertIn("OUTPOST_DOCTOR_RESULT", script)
-        self.assertIn("Work에서 새 채팅", script)
+        self.assertIn("Work의 새 채팅", script)
         self.assertIn("[0-9]* ?Pro", script)
         self.assertIn("preferredModel", script)
         self.assertIn("modelRadios", script)

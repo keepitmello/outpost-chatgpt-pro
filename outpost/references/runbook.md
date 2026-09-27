@@ -12,9 +12,9 @@ There is no automatic alternate sender.
 - `OUTPOST_CHATGPT_URL` and `OUTPOST_PROJECT_NAME` in `~/.codex/outpost.env`
   select the ChatGPT project. `~/.codex/consult.env` and `CONSULT_*` still
   load when the new names are absent. The name is the visible project title, used as
-  `{name}에서 새 채팅`. Default name is `Work` when unset.
+  `{name}의 새 채팅` (older UI: `{name}에서 새 채팅`). Default name is `Work` when unset.
 - `--quality` is one of `pro` (ChatGPT's `Pro` tier with `최신`, answers as
-  `gpt-6-pro`) or `xhigh` (ChatGPT's `매우 높음`, answers as
+  `gpt-6-pro`) or `xhigh` (ChatGPT's `Extra High`, answers as
   `gpt-5-6-thinking`).
 - The packet is self-contained and safe to disclose to Aside and ChatGPT.
 - The packet's first line is one concise Markdown H1 containing only the subject
@@ -193,14 +193,15 @@ modelSlug: gpt-6-pro
 submitElapsedSeconds: <120
 ```
 
-For `--quality xhigh`, the same shape with `tier: 매우 높음 (N of M)` and
+For `--quality xhigh`, the same shape with `tier: Extra High (N of M)` and
 `modelSlug: gpt-5-6-thinking`.
 
 The project banner toggle is `button[data-tpp-toggle-value="chatgpt"|"work"]`.
 Switch to Chat before the picker. Work mode is not a outpost surface.
-The Chat slider stops are `즉시` `중간` `높음` `매우 높음` `Pro`. The closed
-composer pill may expose Pro as `NPro` (quota digits plus label, no space in
-the accessible name). Match the requested label; do not operate the Work-mode
+The Chat slider stops are `Instant` `Medium` `High` `Extra High` `Pro`, under
+the `파워` menuitem. The closed composer pill is named `ChatGPT 모델 선택` and
+shows the current tier as its text; older UIs named it by the tier (`NPro`,
+`매우 높음`), and those names are still accepted. Match the requested label; do not operate the Work-mode
 `최신` Chat picker; never `GPT-5.6 Sol`.
 
 Reject an unverified model or tier, an empty assistant body, or a

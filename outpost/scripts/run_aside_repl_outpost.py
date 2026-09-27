@@ -76,7 +76,7 @@ FORBIDDEN_MODEL_RADIOS = ("GPT-5.6 Sol", "5.6 Sol")
 # alias, so the run is judged by the slug ChatGPT reports for the answer.
 # Each quality is one tier pick, and each tier runs one model. ChatGPT reports
 # the slug it actually ran, so a run checks that slug against the tier it asked
-# for. `pro` is the paid GPT-6 tier; `xhigh` is ChatGPT's `매우 높음`, which runs
+# for. `pro` is the paid GPT-6 tier; `xhigh` is ChatGPT's `Extra High`, which runs
 # GPT-5.6 — cheaper to spend, and never what a Pro packet should be answered by.
 QUALITY_MODEL_SLUGS: dict[str, str] = {
     "pro": "gpt-6-pro",
@@ -86,6 +86,9 @@ QUALITIES = tuple(QUALITY_MODEL_SLUGS)
 WRONG_MODEL_EXIT = 78
 DUPLICATE_SEND_EXIT = 79
 DEFAULT_TIER_ALIASES = (
+    # The picker button's own aria-label. It names the button whatever tier is
+    # selected, so it is the first name the tier lookup tries.
+    "ChatGPT 모델 선택",
     "추론 수준",
     "즉시",
     "중간",
@@ -93,8 +96,18 @@ DEFAULT_TIER_ALIASES = (
     "매우 높음",
     "Pro",
     "Instant",
+    "Medium",
     "High",
+    "Extra High",
 )
+# Slider stop names per quality. ChatGPT has shown them in Korean and in
+# English; a saved contract label is tried first, then these.
+TIER_LABELS: dict[str, tuple[str, ...]] = {
+    "pro": ("Pro",),
+    "xhigh": ("Extra High", "매우 높음"),
+}
+# The slider's own menuitem name, likewise renamed (성능 → 파워).
+TIER_SLIDER_NAMES = ("파워", "성능")
 CONVERSATION_ID_RE = re.compile(r"/c/([0-9a-fA-F-]{8,})")
 KOREAN_UPLOAD_PREAMBLE = (
     "첨부한 독립형 컨텍스트 패킷을 검토하고, 그 안의 질문이나 작업에 답해 주세요.\n\n"
@@ -122,7 +135,7 @@ def default_picker_contract() -> dict[str, Any]:
     return {
         "modelRadio": PREFERRED_MODEL_RADIO,
         "tierAliases": list(DEFAULT_TIER_ALIASES),
-        "xhighLabel": "매우 높음",
+        "xhighLabel": TIER_LABELS["xhigh"][0],
         "proLabel": "Pro",
         "forbiddenModels": list(FORBIDDEN_MODEL_RADIOS),
     }
@@ -205,7 +218,7 @@ def picker_from_doctor_payload(payload: dict[str, Any]) -> dict[str, Any] | None
     return {
         "modelRadio": PREFERRED_MODEL_RADIO,
         "tierAliases": aliases,
-        "xhighLabel": "매우 높음",
+        "xhighLabel": TIER_LABELS["xhigh"][0],
         "proLabel": "Pro",
         "forbiddenModels": list(FORBIDDEN_MODEL_RADIOS),
         "observedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -316,8 +329,26 @@ def is_chatgpt_project_url(value: str | None) -> bool:
     )
 
 
-def composer_aria_label(project_name: str) -> str:
-    return f"{project_name}에서 새 채팅"
+# ChatGPT renders the composer as a ProseMirror editor. It used to carry
+# id="prompt-textarea"; the id is gone now, so match either.
+COMPOSER_EDITORS = (
+    '#prompt-textarea[contenteditable="true"]',
+    '.ProseMirror[contenteditable="true"]',
+)
+
+
+def composer_aria_labels(project_name: str) -> list[str]:
+    # The project home composer names its project; ChatGPT has written the
+    # particle both ways ("Work의 새 채팅", "Work에서 새 채팅").
+    return [f"{project_name}의 새 채팅", f"{project_name}에서 새 채팅"]
+
+
+def composer_selector(labels: Sequence[str] | None = None) -> str:
+    if not labels:
+        return ", ".join(COMPOSER_EDITORS)
+    return ", ".join(
+        f'{editor}[aria-label="{label}"]' for editor in COMPOSER_EDITORS for label in labels
+    )
 
 
 def resolve_project_name(
@@ -987,13 +1018,17 @@ def build_repl_script(
     dry_run: bool = False,
 ) -> str:
     picker = picker or load_picker_contract()
-    target_label = str(picker.get(f"{quality}Label") or "").strip()
-    if not target_label:
+    target_labels: list[str] = []
+    for label in (str(picker.get(f"{quality}Label") or ""), *TIER_LABELS.get(quality, ())):
+        label = " ".join(label.split())
+        if label and label not in target_labels:
+            target_labels.append(label)
+    if not target_labels:
         raise ValueError(f"picker contract has no tier label for quality {quality}")
     target_model = str(picker.get("modelRadio") or PREFERRED_MODEL_RADIO)
     tier_pattern = tier_name_pattern(picker.get("tierAliases") or DEFAULT_TIER_ALIASES)
     model_pattern = r"^" + re.escape(target_model) + r"$"
-    composer_label = composer_aria_label(project_name)
+    composer_labels = composer_aria_labels(project_name)
     continue_mode = bool(conversation_url)
     start_url = conversation_url or project_url
     expected_conversation_id = conversation_id_from_url(conversation_url) or ""
@@ -1003,14 +1038,18 @@ var startUrl = {js(start_url)};
 var continueMode = {js(continue_mode)};
 var expectedConversationId = {js(expected_conversation_id)};
 var outpostId = {js(outpost_id)};
-var composerLabel = {js(composer_label)};
+var composerLabel = {js(" | ".join(composer_labels))};
+var anyComposerSelector = {js(composer_selector())};
+var projectComposerSelector = {js(composer_selector(composer_labels))};
 var quality = {js(quality)};
 var packetName = {js(packet_name)};
 var packetBase64 = {js(packet_base64)};
 var extraUploads = {js(list(uploads or []))};
 var artifactRequested = {js(artifact_output is not None)};
 var composerPrompt = {js(build_composer_prompt(topic, outpost_id, artifact_output, follow_up=follow_up))};
-var targetLabel = {js(target_label)};
+var targetLabels = {js(target_labels)};
+var targetLabel = targetLabels.join(' | ');
+var tierSliderNames = {js(list(TIER_SLIDER_NAMES))};
 var targetModel = {js(target_model)};
 var tierNameRe = new RegExp({js(tier_pattern)});
 var modelNameRe = new RegExp({js(model_pattern)});
@@ -1086,7 +1125,7 @@ var submitState = await Promise.race([
     var composer;
     if (continueMode) {{
       submitStage = 'wait-conversation-composer';
-      composer = await waitComposer(workPage, '#prompt-textarea[contenteditable="true"]', 3);
+      composer = await waitComposer(workPage, anyComposerSelector, 3);
       if (!composer) {{
         throw new Error(
           'saved conversation composer not visible url=' + workPage.url() +
@@ -1102,13 +1141,9 @@ var submitState = await Promise.race([
       }}
     }} else {{
       submitStage = 'wait-project-composer';
-      composer = await waitComposer(
-        workPage,
-        '#prompt-textarea[contenteditable="true"][aria-label="' + composerLabel + '"]',
-        3
-      );
+      composer = await waitComposer(workPage, projectComposerSelector, 3);
       if (!composer) {{
-        var found = await workPage.locator('#prompt-textarea').evaluateAll((els) =>
+        var found = await workPage.locator(anyComposerSelector).evaluateAll((els) =>
           els.map((el) => ({{
             ariaLabel: el.getAttribute('aria-label'),
             contenteditable: el.getAttribute('contenteditable')
@@ -1156,10 +1191,8 @@ var submitState = await Promise.race([
       throw new Error('Work mode selected and Chat toggle missing');
     }}
     composer = continueMode
-      ? workPage.locator('#prompt-textarea[contenteditable="true"]')
-      : workPage.locator(
-          '#prompt-textarea[contenteditable="true"][aria-label="' + composerLabel + '"]'
-        );
+      ? workPage.locator(anyComposerSelector)
+      : workPage.locator(projectComposerSelector);
     await composer.waitFor({{ state: 'visible', timeout: 15000 }});
     submitStage = 'select-tier';
     // Closed Pro pill accessible name is quota+label, e.g. "6 Pro" or "6Pro".
@@ -1179,8 +1212,20 @@ var submitState = await Promise.race([
       );
     }}
     await tierButton.click();
-    var performance = await waitRole(workPage, 'menuitem', '성능', 8000);
-    if (!performance) throw new Error('performance menuitem not visible');
+    var performance = null;
+    var sliderName = null;
+    var sliderDeadline = Date.now() + 8000;
+    while (!performance && Date.now() < sliderDeadline) {{
+      for (var sliderIndex = 0; sliderIndex < tierSliderNames.length; sliderIndex += 1) {{
+        performance = await waitRole(workPage, 'menuitem', tierSliderNames[sliderIndex], 0);
+        if (performance) {{
+          sliderName = tierSliderNames[sliderIndex];
+          break;
+        }}
+      }}
+      if (!performance) await sleep(500);
+    }}
+    if (!performance) throw new Error('performance menuitem not visible: expected ' + tierSliderNames.join(' | '));
     var readTier = (tree) => {{
       var match = tree.match(/([^\\n"]+), (\\d+)개 중 (\\d+)번째/);
       if (!match) return null;
@@ -1193,9 +1238,9 @@ var submitState = await Promise.race([
     var tierSnapshot = await snapshot(workPage, {{ interactive: true }});
     var current = readTier(tierSnapshot.tree);
     if (!current) throw new Error('tier position not readable');
-    if (current.label !== targetLabel) {{
+    if (targetLabels.indexOf(current.label) === -1) {{
       await primeRoles(workPage);
-      performance = workPage.getByRole('menuitem', {{ name: '성능' }});
+      performance = workPage.getByRole('menuitem', {{ name: sliderName }});
       await performance.focus();
       for (var i = 0; i < current.total; i += 1) {{
         await workPage.keyboard.press('ArrowLeft');
@@ -1205,7 +1250,7 @@ var submitState = await Promise.race([
       for (var i = 0; i < total; i += 1) {{
         current = readTier((await snapshot(workPage, {{ interactive: true }})).tree);
         if (!current) throw new Error('tier position not readable');
-        if (current.label === targetLabel) {{
+        if (targetLabels.indexOf(current.label) !== -1) {{
           found = true;
           break;
         }}
@@ -1215,7 +1260,7 @@ var submitState = await Promise.race([
     }}
     var selectedSnapshot = await snapshot(workPage, {{ interactive: true }});
     var selected = readTier(selectedSnapshot.tree);
-    if (!selected || selected.label !== targetLabel) throw new Error('requested tier not verified');
+    if (!selected || targetLabels.indexOf(selected.label) === -1) throw new Error('requested tier not verified');
     verifiedTier = selected.label + ' (' + selected.index + ' of ' + selected.total + ')';
     submitStage = 'verify-model';
     var modelMenu = await waitRole(workPage, 'menuitem', '모델 선택', 8000);
@@ -1254,7 +1299,11 @@ var submitState = await Promise.race([
     );
     if (composerValue !== composerPrompt) throw new Error('composer prompt mismatch');
     submitStage = 'attach-packet';
-    var fileInput = workPage.locator('#upload-files');
+    // The any-file input lost its #upload-files id; it is the composer form's
+    // file input that has no accept filter (the others take images only).
+    var fileInput = workPage.locator(
+      '#upload-files, form input[type="file"]:not([accept]), form input[type="file"][accept=""]'
+    ).first();
     var attachmentName = {js(outpost_id)};
     async function attachmentPresent(timeoutMs) {{
       var attachDeadline = Date.now() + timeoutMs;
@@ -1283,7 +1332,11 @@ var submitState = await Promise.race([
     if (!attached) throw new Error('packet attachment missing before send');
     submitStage = 'ready-to-send';
     var send = workPage.locator(
-      '#composer-submit-button:not(:disabled):not([aria-disabled="true"]):not([data-visually-disabled])'
+      // The send button lost its #composer-submit-button id; the composer
+      // form's submit button labelled 보내기 is the same control.
+      ['#composer-submit-button', 'form button[type="submit"][aria-label="보내기"]']
+        .map((base) => base + ':not(:disabled):not([aria-disabled="true"]):not([data-visually-disabled])')
+        .join(', ')
     );
     await send.waitFor({{ state: 'visible', timeout: 60000 }});
     if (!(await attachmentPresent(10000))) {{
@@ -1323,7 +1376,7 @@ if (dryRun) {{
     stage: 'ready-to-send',
     url: workPage.url(),
     expectedComposer: composerLabel,
-    composerLabels: await workPage.locator('#prompt-textarea').evaluateAll((els) =>
+    composerLabels: await workPage.locator(anyComposerSelector).evaluateAll((els) =>
       els.map((el) => el.getAttribute('aria-label'))
     ).catch(() => []),
     tierInnerText: await workPage.locator('button[aria-haspopup="menu"]').evaluateAll((els) =>
@@ -1958,13 +2011,16 @@ def run_repl_outpost(
 
 
 def build_doctor_script(*, project_url: str, project_name: str, picker: dict[str, Any] | None = None) -> str:
-    composer_label = composer_aria_label(project_name)
+    composer_labels = composer_aria_labels(project_name)
     picker = picker or load_picker_contract()
     tier_pattern = tier_name_pattern(picker.get("tierAliases") or DEFAULT_TIER_ALIASES)
     return f"""
 var projectUrl = {js(project_url)};
-var composerLabel = {js(composer_label)};
+var composerLabel = {js(" | ".join(composer_labels))};
+var anyComposerSelector = {js(composer_selector())};
+var projectComposerSelector = {js(composer_selector(composer_labels))};
 var preferredModel = {js(PREFERRED_MODEL_RADIO)};
+var tierSliderNames = {js(list(TIER_SLIDER_NAMES))};
 var tierNameRe = new RegExp({js(tier_pattern)});
 var report = {{
   url: '',
@@ -1990,16 +2046,14 @@ await page.waitForLoadState('domcontentloaded');
 try {{
   report.url = page.url();
   report.title = await page.title();
-  var composer = page.locator(
-    '#prompt-textarea[contenteditable="true"][aria-label="' + composerLabel + '"]'
-  );
+  var composer = page.locator(projectComposerSelector);
   try {{
     await composer.waitFor({{ state: 'visible', timeout: 30000 }});
     report.composerOk = true;
   }} catch (error) {{
     report.blockers.push('composer');
   }}
-  report.composerLabels = await page.locator('#prompt-textarea').evaluateAll((els) =>
+  report.composerLabels = await page.locator(anyComposerSelector).evaluateAll((els) =>
     els.map((el) => el.getAttribute('aria-label'))
   ).catch(() => []);
   var chatToggle = page.locator('button[data-tpp-toggle-value="chatgpt"]');
@@ -2026,8 +2080,12 @@ try {{
     await tierButton.click();
     await sleep(800);
     await snapshot(page, {{ interactive: true }});
-    report.performanceVisible = await page.getByRole('menuitem', {{ name: '성능' }})
-      .isVisible().catch(() => false);
+    for (var sliderName of tierSliderNames) {{
+      if (await page.getByRole('menuitem', {{ name: sliderName }}).isVisible().catch(() => false)) {{
+        report.performanceVisible = true;
+        break;
+      }}
+    }}
     var modelItem = page.getByRole('menuitem', {{ name: '모델 선택' }});
     report.modelMenuVisible = await modelItem.isVisible().catch(() => false);
     if (!report.performanceVisible) report.blockers.push('performance');

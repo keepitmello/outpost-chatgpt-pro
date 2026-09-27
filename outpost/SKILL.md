@@ -28,7 +28,7 @@ cannot reach.
 - `--quality pro` — ChatGPT's `Pro` tier with the `최신` model. Runs `gpt-6-pro`;
   the only quality a packet worth an Outpost run gets. A turn can run 15–20
   minutes and each send spends weekly Pro quota: send once, never re-send.
-- `--quality xhigh` — ChatGPT's `매우 높음` tier. Runs `gpt-5-6-thinking`, so it
+- `--quality xhigh` — ChatGPT's `Extra High` tier. Runs `gpt-5-6-thinking`, so it
   is cheaper and enough to prove the plumbing end to end, but it is not a Pro
   answer. Never hand a Pro-quality question to it.
 
