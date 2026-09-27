@@ -26,7 +26,13 @@ class AsideReplConsultTest(unittest.TestCase):
         self.addCleanup(self._sessions_dir.cleanup)
         self._sessions_env = mock.patch.dict(
             os.environ,
-            {"OUTPOST_SESSIONS_PATH": str(Path(self._sessions_dir.name) / "sessions.json")},
+            {
+                "OUTPOST_SESSIONS_PATH": str(Path(self._sessions_dir.name) / "sessions.json"),
+                # A test never reads the machine's learned screen map or calls
+                # the heal model unless it asks to.
+                "OUTPOST_UI_MAP_PATH": str(Path(self._sessions_dir.name) / "outpost-ui.json"),
+                "OUTPOST_AUTO_HEAL": "0",
+            },
         )
         self._sessions_env.start()
         self.addCleanup(self._sessions_env.stop)
@@ -178,7 +184,6 @@ class AsideReplConsultTest(unittest.TestCase):
             topic="t",
             outpost_id="abc123",
             response_timeout_ms=1000,
-            picker=MODULE.default_picker_contract(),
         )
         # ChatGPT has named the xhigh stop in both languages; either verifies it.
         self.assertIn('var targetLabels = ["Extra High", "매우 높음"]', xhigh)
@@ -188,8 +193,6 @@ class AsideReplConsultTest(unittest.TestCase):
         self.assertNotIn("매우 높음|Pro)$", pro)
         self.assertIn("OUTPOST_FAIL stage=", pro)
         self.assertIn("OUTPOST_FAIL stage=' + submitStage", pro)
-        self.assertIn('data-tpp-toggle-value="chatgpt"', pro)
-        self.assertIn('data-tpp-toggle-value="work"', pro)
         self.assertIn("Chat surface not selected", pro)
         self.assertIn("Work mode selected and Chat toggle missing", pro)
         self.assertIn("chatToggleVisible", pro)
@@ -240,12 +243,11 @@ class AsideReplConsultTest(unittest.TestCase):
         self.assertIn("keyboard.insertText(composerPrompt)", pro)
         self.assertIn("Array.from(el.children)", pro)
         self.assertIn("composerValue !== composerPrompt", pro)
-        # send waits for an enabled button, whichever name the UI gives it
-        self.assertIn(
-            ':not(:disabled):not([aria-disabled="true"]):not([data-visually-disabled])',
-            pro,
-        )
-        self.assertIn("#upload-files", pro)
+        # send waits for an enabled button, whichever selector the map gives it
+        send_line = next(line for line in pro.splitlines() if line.startswith("var sendSelector = "))
+        send_selector = json.loads(send_line[len("var sendSelector = "):].rstrip(";"))
+        for part in send_selector.split(", "):
+            self.assertTrue(part.endswith(':not([data-visually-disabled])'), part)
         self.assertIn("waitRole(workPage, 'group'", pro)
         self.assertIn("attachmentPresent(", pro)
         self.assertNotIn("getByText(packetName, { exact: true })", pro)
@@ -278,143 +280,9 @@ class AsideReplConsultTest(unittest.TestCase):
         self.assertIn("단계: select-tier (추론 수준/Pro 버튼)", text)
         self.assertIn("tier button not visible", text)
 
-    def test_doctor_script_probes_without_sending(self) -> None:
-        script = MODULE.build_doctor_script(
-            project_url="https://chatgpt.com/g/g-p-test-work/project",
-            project_name="Work",
-        )
-        self.assertIn("OUTPOST_DOCTOR_RESULT", script)
-        self.assertIn("Work의 새 채팅", script)
-        self.assertIn("[0-9]* ?Pro", script)
-        self.assertIn("preferredModel", script)
-        self.assertIn("modelRadios", script)
-        # doctor probes the same lookup send uses; no click fallback may cover
-        # for a failed name lookup and report a green light send cannot reach
-        self.assertIn("waitNamedRef(page, 'button', tierNameRe", script)
-        self.assertNotIn("tierFallback", script)
-        self.assertNotIn("menus.nth(", script)
-        self.assertNotIn("insertText", script)
-        self.assertNotIn("setInputFiles", script)
-        self.assertNotIn("composer-submit-button", script)
-        self.assertIn("closeTab", script)
-
-    def test_the_doctor_rehearses_the_send_path_with_a_throwaway_packet(self) -> None:
-        transcript = MODULE.REHEARSAL_MARKER + json.dumps(
-            {
-                "ok": True,
-                "stage": "ready-to-send",
-                "url": "https://chatgpt.com/g/g-p-test-work/project",
-                "tierInnerText": ["6 Pro"],
-                "modelRadios": [{"name": "최신", "checked": True}],
-            }
-        )
-        with mock.patch.object(MODULE, "ensure_aside_daemon", return_value=None):
-            with mock.patch.object(MODULE, "aside_daemon_health", return_value=None):
-                with mock.patch.object(MODULE, "save_picker_contract", return_value=Path("/tmp/x.json")):
-                    with mock.patch.object(MODULE, "build_repl_script") as build:
-                        build.return_value = "script"
-                        with mock.patch.object(
-                            MODULE, "run_repl_process", return_value=transcript
-                        ):
-                            args = MODULE.parse_args(
-                                [
-                                    "--doctor",
-                                    "--url", "https://chatgpt.com/g/g-p-test-work/project",
-                                    "--project", "Work",
-                                ]
-                            )
-                            code = MODULE.run_doctor(args)
-        self.assertEqual(code, 0)
-        # doctor and send must run one script, or doctor can pass on a lookup the
-        # send cannot perform — the bug that hid three broken sends.
-        self.assertTrue(build.call_args.kwargs["dry_run"])
-        self.assertEqual(build.call_args.kwargs["topic"], MODULE.REHEARSAL_TOPIC)
-
-    def test_the_doctor_report_reads_a_rehearsal_payload(self) -> None:
-        text = MODULE.format_doctor_report(
-            {
-                "ok": True,
-                "stage": "ready-to-send",
-                "url": "https://chatgpt.com/g/g-p-test-work/project",
-                "expectedComposer": "Work에서 새 채팅",
-                "composerLabels": ["Work에서 새 채팅"],
-                "tierLabel": "Pro",
-                "tier": "Pro (5 of 5)",
-                "model": "최신",
-                "latestRadioPresent": True,
-                "modelRadios": [{"name": "최신", "checked": True}],
-                "daemonUptime": "2h",
-                "daemonPid": 42,
-                "blockers": [],
-            }
-        )
-        self.assertIn("ok=true", text)
-        self.assertIn("daemon up=2h pid=42", text)
-        self.assertIn("stage=ready-to-send", text)
-        self.assertIn("Pro (5 of 5)", text)
-
-    def test_the_doctor_report_names_the_stage_a_rehearsal_failed_at(self) -> None:
-        text = MODULE.format_doctor_report(
-            {
-                "ok": False,
-                "stage": "select-tier",
-                "detail": "tier button not visible",
-                "blockers": ["rehearsal"],
-                "daemonUptime": "1m",
-                "daemonPid": 7,
-            }
-        )
-        self.assertIn("ok=false", text)
-        self.assertIn("stage=select-tier", text)
-        self.assertIn("detail=tier button not visible", text)
-        self.assertIn("blockers=rehearsal", text)
-
     def test_doctor_flag_does_not_need_packet(self) -> None:
         args = MODULE.parse_args(["--doctor"])
         self.assertTrue(args.doctor)
-
-    def test_doctor_payload_writes_picker_aliases_not_sidebar_menus(self) -> None:
-        contract = MODULE.picker_from_doctor_payload(
-            {
-                "url": "https://chatgpt.com/g/g-p-test-work/project",
-                "tierInnerText": ["6 Pro", "Work 프로젝트 옵션 열기"],
-                "modelRadios": [
-                    {"name": "최신", "checked": True},
-                    {"name": "GPT-5.6 Sol", "checked": False},
-                ],
-            }
-        )
-        self.assertIsNotNone(contract)
-        assert contract is not None
-        self.assertEqual(contract["modelRadio"], "최신")
-        self.assertIn("6 Pro", contract["tierAliases"])
-        self.assertNotIn("Work 프로젝트 옵션 열기", contract["tierAliases"])
-        self.assertIsNone(
-            MODULE.picker_from_doctor_payload(
-                {"modelRadios": [{"name": "GPT-5.6 Sol", "checked": True}]}
-            )
-        )
-
-    def test_send_script_uses_saved_picker_contract(self) -> None:
-        script = MODULE.build_repl_script(
-            project_url="https://chatgpt.com/g/g-p-test-work/project",
-            quality="pro",
-            packet_name="packet.md",
-            packet_base64="cGFja2V0",
-            topic="병렬 세션 탭 소유권",
-            outpost_id="abc123",
-            response_timeout_ms=1000,
-            picker={
-                "modelRadio": "최신",
-                "tierAliases": ["추론 수준", "6 Pro", "Pro"],
-                "proLabel": "매우 높음",
-                "proLabel": "Pro",
-            },
-        )
-        self.assertIn("tierNameRe", script)
-        self.assertIn("6Pro", script)
-        self.assertIn("targetModel", script)
-        self.assertIn("최신", script)
 
     def test_packet_topic_requires_the_first_line_h1(self) -> None:
         self.assertEqual(

@@ -34,7 +34,13 @@ class ModelAndLossGuardTest(unittest.TestCase):
         self.addCleanup(self._sessions_dir.cleanup)
         env = mock.patch.dict(
             os.environ,
-            {"OUTPOST_SESSIONS_PATH": str(Path(self._sessions_dir.name) / "sessions.json")},
+            {
+                "OUTPOST_SESSIONS_PATH": str(Path(self._sessions_dir.name) / "sessions.json"),
+                # A test never reads the machine's learned screen map or calls
+                # the heal model unless it asks to.
+                "OUTPOST_UI_MAP_PATH": str(Path(self._sessions_dir.name) / "outpost-ui.json"),
+                "OUTPOST_AUTO_HEAL": "0",
+            },
         )
         env.start()
         self.addCleanup(env.stop)
@@ -191,11 +197,16 @@ class ModelAndLossGuardTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             fake = root / "aside"
-            fake.write_text("#!/usr/bin/env python3\nprint('nothing')\n", encoding="utf-8")
+            result_path = root / "result.json"
+            during = root / "result.during.json"
+            fake.write_text(
+                "#!/usr/bin/env python3\nimport shutil\n"
+                f"shutil.copyfile({str(result_path)!r}, {str(during)!r})\nprint('nothing')\n",
+                encoding="utf-8",
+            )
             fake.chmod(0o755)
             packet = root / "packet.md"
             packet.write_text("# Topic\n\nquestion", encoding="utf-8")
-            result_path = root / "result.json"
             path = f"{root}{os.pathsep}{os.environ.get('PATH', '')}"
             with mock.patch.dict(os.environ, {"PATH": path}):
                 with mock.patch.object(MODULE, "ensure_aside_daemon", return_value=None):
@@ -210,11 +221,16 @@ class ModelAndLossGuardTest(unittest.TestCase):
                                 "--stderr-output", str(root / "stderr.log"),
                             ]
                         )
-            self.assertTrue(result_path.is_file())
-            pending = json.loads(result_path.read_text(encoding="utf-8"))
+            # written before the send, so a dead REPL still leaves a recoverable turn
+            pending = json.loads(during.read_text(encoding="utf-8"))
             self.assertEqual(pending["status"], "submitted_pending")
             self.assertTrue(pending["id"])
             self.assertTrue(pending["packetSha"])
+            # this send died before the click, so the run must not look sent:
+            # sending the same packet again is the fix, not a duplicate (exit 79)
+            final = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(final["status"], "not_sent")
+            self.assertEqual(final["packetSha"], pending["packetSha"])
 
     def test_non_ascii_upload_names_are_renamed_before_upload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

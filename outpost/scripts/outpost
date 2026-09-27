@@ -85,6 +85,8 @@ def build_engine_argv(command: str, args: argparse.Namespace) -> list[str]:
         argv = ["--doctor"]
         if args.json:
             argv.append("--json")
+        if args.no_heal:
+            argv.append("--no-heal")
         if args.url:
             argv.extend(["--url", args.url])
         if args.project:
@@ -153,8 +155,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     listed.add_argument("--limit", type=int, default=20)
     listed.add_argument("--sessions-file", default=None)
 
-    doctor = sub.add_parser("doctor", help="Probe ChatGPT UI without sending.")
+    doctor = sub.add_parser(
+        "doctor",
+        help="Rehearse Pro, send one xhigh round trip, and heal the screen map.",
+    )
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--no-heal", action="store_true", help="Report only; do not rewrite the screen map.")
     doctor.add_argument("--url", default=None)
     doctor.add_argument("--project", default=None)
 

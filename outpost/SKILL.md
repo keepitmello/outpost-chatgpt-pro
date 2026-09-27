@@ -75,14 +75,16 @@ Read `response.md` and `result.json`. Verify every material claim locally
 before acting. Discard an unrelated reply. `references/after-advice.md`
 governs that pass.
 
-- Exit `75` — nothing was sent. Report the failure and stop.
+- Exit `75` — nothing was sent. The send already tried to heal a changed
+  ChatGPT screen and failed; report the stage and stop. The same packet may be
+  sent again after `outpost doctor` is green.
 - Exit `76` — send is unproven. Do not retry.
 - Exit `77` — the turn committed but the reply was not saved. Run
   `outpost recover`. Never resend that packet. A later `--to` is a new turn,
   not a resend.
 - Exit `78` — the answer was saved but ChatGPT ran a model other than the one
   this quality expects. Do not act on it as the quality you asked for; run
-  `outpost doctor` and fix the picker.
+  `outpost doctor`.
 - Exit `79` — this run directory already sent this packet. Recover it instead
   of sending again; `OUTPOST_FORCE=1` overrides only when you mean to spend
   another Pro turn.

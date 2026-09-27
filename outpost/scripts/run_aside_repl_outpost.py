@@ -48,8 +48,13 @@ SUBMIT_MARKER = "ASIDE_REPL_SUBMIT_RESULT "
 SUBMIT_UNKNOWN_MARKER = "ASIDE_REPL_SUBMIT_UNKNOWN "
 RESPONSE_MARKER = "ASIDE_REPL_RESPONSE_RESULT "
 BACKEND_RECOVERY_MARKER = "ASIDE_BACKEND_RECOVERY_RESULT "
-DOCTOR_MARKER = "OUTPOST_DOCTOR_RESULT "
 REHEARSAL_MARKER = "OUTPOST_REHEARSAL_RESULT "
+DIAG_MARKER = "OUTPOST_DIAG "
+# Aside drops the whole output of a script that ends in an error once it passes
+# roughly 16-20 KB, and a failed step always ends in one, so the page report
+# has to fit well under that next to the error itself.
+DIAG_TREE_LIMIT = 7000
+DIAG_OUTLINE_LIMIT = 4000
 # The REPL drops a top-level `return`: the script then stops silently partway,
 # with no error and no output. The rehearsal ends with a sentinel throw instead.
 REHEARSAL_STOP = "OUTPOST_REHEARSAL_STOP"
@@ -63,14 +68,16 @@ STAGE_HINTS = {
     "wait-conversation-composer": "이어가기 입력창",
     "select-chat-surface": "Chat/Work 토글",
     "select-tier": "추론 수준/Pro 버튼",
-    "verify-model": "모델 선택",
+    "open-tier-slider": "추론 슬라이더 메뉴",
+    "read-tier": "추론 단계 읽기",
+    "pick-tier": "추론 단계 고르기",
+    "open-model-menu": "모델 선택 메뉴",
+    "verify-model": "최신 모델 라디오",
     "fill-composer": "입력창 채우기",
     "attach-packet": "패킷 첨부",
     "ready-to-send": "보내기 버튼",
     "commit-user-turn": "제출",
 }
-DEFAULT_PICKER_PATH = Path.home() / ".codex" / "outpost-picker.json"
-PREFERRED_MODEL_RADIO = "최신"
 FORBIDDEN_MODEL_RADIOS = ("GPT-5.6 Sol", "5.6 Sol")
 # The only model an outpost turn may run on. The picker label is a moving
 # alias, so the run is judged by the slug ChatGPT reports for the answer.
@@ -85,29 +92,6 @@ QUALITY_MODEL_SLUGS: dict[str, str] = {
 QUALITIES = tuple(QUALITY_MODEL_SLUGS)
 WRONG_MODEL_EXIT = 78
 DUPLICATE_SEND_EXIT = 79
-DEFAULT_TIER_ALIASES = (
-    # The picker button's own aria-label. It names the button whatever tier is
-    # selected, so it is the first name the tier lookup tries.
-    "ChatGPT 모델 선택",
-    "추론 수준",
-    "즉시",
-    "중간",
-    "높음",
-    "매우 높음",
-    "Pro",
-    "Instant",
-    "Medium",
-    "High",
-    "Extra High",
-)
-# Slider stop names per quality. ChatGPT has shown them in Korean and in
-# English; a saved contract label is tried first, then these.
-TIER_LABELS: dict[str, tuple[str, ...]] = {
-    "pro": ("Pro",),
-    "xhigh": ("Extra High", "매우 높음"),
-}
-# The slider's own menuitem name, likewise renamed (성능 → 파워).
-TIER_SLIDER_NAMES = ("파워", "성능")
 CONVERSATION_ID_RE = re.compile(r"/c/([0-9a-fA-F-]{8,})")
 KOREAN_UPLOAD_PREAMBLE = (
     "첨부한 독립형 컨텍스트 패킷을 검토하고, 그 안의 질문이나 작업에 답해 주세요.\n\n"
@@ -127,56 +111,19 @@ KOREAN_FOLLOWUP_PREAMBLE = (
 
 
 
-def picker_contract_path() -> Path:
-    return Path(os.environ.get("OUTPOST_PICKER_PATH") or DEFAULT_PICKER_PATH)
+def load_ui_module():
+    spec = importlib.util.spec_from_file_location(
+        "outpost_ui",
+        Path(__file__).with_name("outpost_ui.py"),
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("outpost_ui.py is missing")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def default_picker_contract() -> dict[str, Any]:
-    return {
-        "modelRadio": PREFERRED_MODEL_RADIO,
-        "tierAliases": list(DEFAULT_TIER_ALIASES),
-        "xhighLabel": TIER_LABELS["xhigh"][0],
-        "proLabel": "Pro",
-        "forbiddenModels": list(FORBIDDEN_MODEL_RADIOS),
-    }
-
-
-def load_picker_contract() -> dict[str, Any]:
-    contract = default_picker_contract()
-    path = picker_contract_path()
-    if not path.is_file():
-        return contract
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return contract
-    if not isinstance(data, dict):
-        return contract
-    model = str(data.get("modelRadio") or "").strip()
-    if model and model not in FORBIDDEN_MODEL_RADIOS:
-        contract["modelRadio"] = model
-    aliases = data.get("tierAliases")
-    if isinstance(aliases, list):
-        merged: list[str] = []
-        for item in list(DEFAULT_TIER_ALIASES) + [str(alias) for alias in aliases]:
-            text = " ".join(item.split())
-            if text and text not in merged:
-                merged.append(text)
-        contract["tierAliases"] = merged
-    xhigh = str(data.get("xhighLabel") or "").strip()
-    pro = str(data.get("proLabel") or "").strip()
-    if xhigh:
-        contract["xhighLabel"] = xhigh
-    if pro:
-        contract["proLabel"] = pro
-    return contract
-
-
-def save_picker_contract(contract: dict[str, Any]) -> Path:
-    path = picker_contract_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(contract, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return path
+UI = load_ui_module()
 
 
 def tier_name_pattern(aliases: Sequence[str]) -> str:
@@ -193,41 +140,6 @@ def tier_name_pattern(aliases: Sequence[str]) -> str:
             parts.append(re.escape(candidate))
     parts.append(r"[0-9]* ?Pro")
     return r"^(?:" + "|".join(parts) + r")$"
-
-
-def picker_from_doctor_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
-    radios = payload.get("modelRadios") or []
-    names: list[str] = []
-    for row in radios:
-        if isinstance(row, dict):
-            name = str(row.get("name") or "").strip()
-        else:
-            name = str(row).strip()
-        if name:
-            names.append(name)
-    if PREFERRED_MODEL_RADIO not in names:
-        return None
-    aliases: list[str] = []
-    hint = re.compile(r"(추론|즉시|중간|높음|Pro|Instant|High|Thinking)", re.I)
-    for item in list(DEFAULT_TIER_ALIASES) + [str(x) for x in (payload.get("tierInnerText") or [])]:
-        text = " ".join(item.split())
-        if not text or text in aliases:
-            continue
-        if text in DEFAULT_TIER_ALIASES or hint.search(text):
-            aliases.append(text)
-    return {
-        "modelRadio": PREFERRED_MODEL_RADIO,
-        "tierAliases": aliases,
-        "xhighLabel": TIER_LABELS["xhigh"][0],
-        "proLabel": "Pro",
-        "forbiddenModels": list(FORBIDDEN_MODEL_RADIOS),
-        "observedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "url": str(payload.get("url") or ""),
-        "modelRadios": names,
-        "tierInnerText": [
-            " ".join(str(x).split()) for x in (payload.get("tierInnerText") or []) if str(x).strip()
-        ],
-    }
 
 
 def load_sessions_module():
@@ -329,26 +241,16 @@ def is_chatgpt_project_url(value: str | None) -> bool:
     )
 
 
-# ChatGPT renders the composer as a ProseMirror editor. It used to carry
-# id="prompt-textarea"; the id is gone now, so match either.
-COMPOSER_EDITORS = (
-    '#prompt-textarea[contenteditable="true"]',
-    '.ProseMirror[contenteditable="true"]',
-)
+def composer_aria_labels(project_name: str, ui: dict[str, Any] | None = None) -> list[str]:
+    ui = ui or UI.load_ui_map()
+    return [label.replace("{project}", project_name) for label in ui["projectComposerLabels"]]
 
 
-def composer_aria_labels(project_name: str) -> list[str]:
-    # The project home composer names its project; ChatGPT has written the
-    # particle both ways ("Work의 새 채팅", "Work에서 새 채팅").
-    return [f"{project_name}의 새 채팅", f"{project_name}에서 새 채팅"]
-
-
-def composer_selector(labels: Sequence[str] | None = None) -> str:
+def composer_selector(labels: Sequence[str] | None = None, ui: dict[str, Any] | None = None) -> str:
+    editors = (ui or UI.load_ui_map())["composer"]
     if not labels:
-        return ", ".join(COMPOSER_EDITORS)
-    return ", ".join(
-        f'{editor}[aria-label="{label}"]' for editor in COMPOSER_EDITORS for label in labels
-    )
+        return ", ".join(editors)
+    return ", ".join(f'{editor}[aria-label="{label}"]' for editor in editors for label in labels)
 
 
 def resolve_project_name(
@@ -1013,22 +915,19 @@ def build_repl_script(
     artifact_output: str | None = None,
     conversation_url: str | None = None,
     follow_up: bool = False,
-    picker: dict[str, Any] | None = None,
+    ui: dict[str, Any] | None = None,
     uploads: Sequence[dict[str, str]] | None = None,
     dry_run: bool = False,
 ) -> str:
-    picker = picker or load_picker_contract()
-    target_labels: list[str] = []
-    for label in (str(picker.get(f"{quality}Label") or ""), *TIER_LABELS.get(quality, ())):
-        label = " ".join(label.split())
-        if label and label not in target_labels:
-            target_labels.append(label)
+    ui = ui or UI.load_ui_map()
+    target_labels = list(ui["tierLabels"].get(quality) or [])
     if not target_labels:
-        raise ValueError(f"picker contract has no tier label for quality {quality}")
-    target_model = str(picker.get("modelRadio") or PREFERRED_MODEL_RADIO)
-    tier_pattern = tier_name_pattern(picker.get("tierAliases") or DEFAULT_TIER_ALIASES)
+        raise ValueError(f"screen map has no tier label for quality {quality}")
+    target_model = str(ui["modelRadio"])
+    tier_pattern = tier_name_pattern(ui["tierButtonNames"])
     model_pattern = r"^" + re.escape(target_model) + r"$"
-    composer_labels = composer_aria_labels(project_name)
+    composer_labels = composer_aria_labels(project_name, ui)
+    enabled = ':not(:disabled):not([aria-disabled="true"]):not([data-visually-disabled])'
     continue_mode = bool(conversation_url)
     start_url = conversation_url or project_url
     expected_conversation_id = conversation_id_from_url(conversation_url) or ""
@@ -1039,8 +938,18 @@ var continueMode = {js(continue_mode)};
 var expectedConversationId = {js(expected_conversation_id)};
 var outpostId = {js(outpost_id)};
 var composerLabel = {js(" | ".join(composer_labels))};
-var anyComposerSelector = {js(composer_selector())};
-var projectComposerSelector = {js(composer_selector(composer_labels))};
+var anyComposerSelector = {js(composer_selector(None, ui))};
+var projectComposerSelector = {js(composer_selector(composer_labels, ui))};
+var chatToggleSelector = {js(UI.css(ui["chatToggle"]))};
+var workToggleSelector = {js(UI.css(ui["workToggle"]))};
+var fileInputSelector = {js(UI.css(ui["fileInput"]))};
+var sendSelector = {js(", ".join(sel + enabled for sel in ui["sendButton"]))};
+var stopSelector = {js(UI.css(ui["stopButton"]))};
+var copyResponseSelector = {js(UI.css(ui["copyResponse"]))};
+var userMessageSelector = {js(UI.css(ui["userMessage"]))};
+var assistantMessageSelector = {js(UI.css(ui["assistantMessage"]))};
+var modelMenuNames = {js(list(ui["modelMenuNames"]))};
+var tierPositionRe = new RegExp({js(ui["tierPositionPattern"])});
 var quality = {js(quality)};
 var packetName = {js(packet_name)};
 var packetBase64 = {js(packet_base64)};
@@ -1049,7 +958,7 @@ var artifactRequested = {js(artifact_output is not None)};
 var composerPrompt = {js(build_composer_prompt(topic, outpost_id, artifact_output, follow_up=follow_up))};
 var targetLabels = {js(target_labels)};
 var targetLabel = targetLabels.join(' | ');
-var tierSliderNames = {js(list(TIER_SLIDER_NAMES))};
+var tierSliderNames = {js(list(ui["tierSliderNames"]))};
 var targetModel = {js(target_model)};
 var tierNameRe = new RegExp({js(tier_pattern)});
 var modelNameRe = new RegExp({js(model_pattern)});
@@ -1058,6 +967,9 @@ var dryRun = {js(dry_run)};
 var modelRadiosSeen = [];
 var submitStartedAt = Date.now();
 var submitStage = 'open-isolated-tab';
+var diagPage = null;
+var diagEmitted = false;
+var presubmitDone = false;
 // Aside builds its role/accessible-name index inside snapshot(). getByRole()
 // returns zero matches on a page that was never snapshotted in this REPL
 // session, so every role lookup below primes the index first.
@@ -1081,6 +993,74 @@ async function bodyTextOf(target) {{
   return await target.evaluate(function () {{
     return (document.body && document.body.innerText || '').trim();
   }}).catch(function () {{ return ''; }});
+}}
+// A failed step leaves what the page showed at that moment, so doctor can hand
+// it to the heal model instead of a person opening the page to look.
+async function captureDiag(target) {{
+  var diag = {{ stage: submitStage, url: '', title: '', tree: '', outline: [] }};
+  try {{ diag.url = target.url(); }} catch (error) {{}}
+  try {{ diag.title = await target.title(); }} catch (error) {{}}
+  try {{
+    // Sidebar conversation links fill the tree and are never a control the
+    // send uses; everything else stays, one short line each.
+    diag.tree = String((await snapshot(target, {{ interactive: true }})).tree || '')
+      .split('\\n')
+      .filter((line) => !/^\\s*- link /.test(line))
+      .map((line) => line.slice(0, 160))
+      .join('\\n')
+      .slice(0, {DIAG_TREE_LIMIT});
+  }} catch (error) {{}}
+  try {{
+    diag.outline = await target.evaluate(function () {{
+      var seen = new Set();
+      var rows = [];
+      // The controls the send drives come first, so the size cap below never
+      // cuts them: editors and file inputs, then submit and menu buttons and
+      // toggles, then the rest of the form and any open menu.
+      var groups = [
+        '[contenteditable], textarea, input[type="file"]',
+        'form button[type="submit"], button[aria-haspopup], [data-tpp-toggle-value]',
+        '[role="menu"] [role], [role="menu"] button, [role="dialog"] button, form button, form [role]'
+      ];
+      groups.forEach(function (selector) {{
+        document.querySelectorAll(selector).forEach(function (el) {{
+          if (seen.has(el) || rows.length >= 120) return;
+          if (el.closest('nav, a[href*="/c/"]')) return;
+          seen.add(el);
+          var box = el.getBoundingClientRect();
+          rows.push({{
+            tag: el.tagName.toLowerCase(),
+            id: el.id || undefined,
+            role: el.getAttribute('role') || undefined,
+            aria: el.getAttribute('aria-label') || undefined,
+            type: el.getAttribute('type') || undefined,
+            accept: el.hasAttribute('accept') ? el.getAttribute('accept') : undefined,
+            editable: el.getAttribute('contenteditable') || undefined,
+            testid: el.getAttribute('data-testid') || undefined,
+            checked: el.getAttribute('aria-checked') || undefined,
+            disabled: (el.disabled || el.getAttribute('aria-disabled') === 'true') || undefined,
+            cls: (typeof el.className === 'string' ? el.className : '').slice(0, 30) || undefined,
+            text: (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 40) || undefined,
+            hidden: !(box.width || box.height) || undefined
+          }});
+        }});
+      }});
+      return rows;
+    }});
+  }} catch (error) {{}}
+  while (diag.outline.length && JSON.stringify(diag.outline).length > {DIAG_OUTLINE_LIMIT}) {{
+    diag.outline.pop();
+  }}
+  return diag;
+}}
+async function emitDiag() {{
+  if (diagEmitted || !diagPage) return;
+  diagEmitted = true;
+  var diag = await Promise.race([
+    captureDiag(diagPage),
+    new Promise((resolve) => setTimeout(() => resolve(null), 15000))
+  ]);
+  if (diag) console.log({js(DIAG_MARKER)} + JSON.stringify(diag));
 }}
 async function waitComposer(target, selector, attempts) {{
   for (var composerAttempt = 0; composerAttempt < attempts; composerAttempt += 1) {{
@@ -1113,6 +1093,7 @@ var submitState = await Promise.race([
     var ownershipMarker = 'outpost-owner-' + {js(outpost_id)};
     var ownershipUrl = 'data:text/html,<title>' + ownershipMarker + '</title>';
     var workPage = await openTab(ownershipUrl);
+    diagPage = workPage;
     var openedTabs = await listBrowserTabs();
     var ownedTabs = openedTabs.filter(
       (tab) => tab.title === ownershipMarker && tab.url === ownershipUrl
@@ -1157,14 +1138,14 @@ var submitState = await Promise.race([
         );
       }}
     }}
-    var assistantCountBefore = await workPage.locator('[data-message-author-role="assistant"]').count();
+    var assistantCountBefore = await workPage.locator(assistantMessageSelector).count();
     if (!continueMode && assistantCountBefore !== 0) throw new Error('isolated Work composer contains stale assistant turns');
     if ((await bodyTextOf(workPage)).indexOf('요청이 너무 많습니다') !== -1) {{
       throw new Error('ChatGPT rate-limited the project page');
     }}
     submitStage = 'select-chat-surface';
-    var chatToggle = workPage.locator('button[data-tpp-toggle-value="chatgpt"]');
-    var workToggle = workPage.locator('button[data-tpp-toggle-value="work"]');
+    var chatToggle = workPage.locator(chatToggleSelector);
+    var workToggle = workPage.locator(workToggleSelector);
     var chatToggleVisible = false;
     try {{
       await chatToggle.waitFor({{ state: 'visible', timeout: 3000 }});
@@ -1212,6 +1193,7 @@ var submitState = await Promise.race([
       );
     }}
     await tierButton.click();
+    submitStage = 'open-tier-slider';
     var performance = null;
     var sliderName = null;
     var sliderDeadline = Date.now() + 8000;
@@ -1227,17 +1209,19 @@ var submitState = await Promise.race([
     }}
     if (!performance) throw new Error('performance menuitem not visible: expected ' + tierSliderNames.join(' | '));
     var readTier = (tree) => {{
-      var match = tree.match(/([^\\n"]+), (\\d+)개 중 (\\d+)번째/);
-      if (!match) return null;
+      var match = tree.match(tierPositionRe);
+      if (!match || !match.groups) return null;
       return {{
-        label: match[1].replace(/^.*text: "/, '').trim(),
-        total: Number(match[2]),
-        index: Number(match[3])
+        label: match.groups.label.replace(/^.*text: "/, '').trim(),
+        total: Number(match.groups.total),
+        index: Number(match.groups.index)
       }};
     }};
+    submitStage = 'read-tier';
     var tierSnapshot = await snapshot(workPage, {{ interactive: true }});
     var current = readTier(tierSnapshot.tree);
     if (!current) throw new Error('tier position not readable');
+    submitStage = 'pick-tier';
     if (targetLabels.indexOf(current.label) === -1) {{
       await primeRoles(workPage);
       performance = workPage.getByRole('menuitem', {{ name: sliderName }});
@@ -1262,10 +1246,18 @@ var submitState = await Promise.race([
     var selected = readTier(selectedSnapshot.tree);
     if (!selected || targetLabels.indexOf(selected.label) === -1) throw new Error('requested tier not verified');
     verifiedTier = selected.label + ' (' + selected.index + ' of ' + selected.total + ')';
-    submitStage = 'verify-model';
-    var modelMenu = await waitRole(workPage, 'menuitem', '모델 선택', 8000);
-    if (!modelMenu) throw new Error('model menu not visible');
+    submitStage = 'open-model-menu';
+    var modelMenu = null;
+    var modelMenuDeadline = Date.now() + 8000;
+    while (!modelMenu && Date.now() < modelMenuDeadline) {{
+      for (var menuIndex = 0; menuIndex < modelMenuNames.length && !modelMenu; menuIndex += 1) {{
+        modelMenu = await waitRole(workPage, 'menuitem', modelMenuNames[menuIndex], 0);
+      }}
+      if (!modelMenu) await sleep(500);
+    }}
+    if (!modelMenu) throw new Error('model menu not visible: expected ' + modelMenuNames.join(' | '));
     await modelMenu.click();
+    submitStage = 'verify-model';
     // The model radio has no aria-label either; its name is its own text.
     var latest = await waitNamedRef(workPage, 'menuitemradio', modelNameRe, 8000);
     if (!latest) {{
@@ -1299,11 +1291,7 @@ var submitState = await Promise.race([
     );
     if (composerValue !== composerPrompt) throw new Error('composer prompt mismatch');
     submitStage = 'attach-packet';
-    // The any-file input lost its #upload-files id; it is the composer form's
-    // file input that has no accept filter (the others take images only).
-    var fileInput = workPage.locator(
-      '#upload-files, form input[type="file"]:not([accept]), form input[type="file"][accept=""]'
-    ).first();
+    var fileInput = workPage.locator(fileInputSelector).first();
     var attachmentName = {js(outpost_id)};
     async function attachmentPresent(timeoutMs) {{
       var attachDeadline = Date.now() + timeoutMs;
@@ -1331,13 +1319,7 @@ var submitState = await Promise.race([
     }}
     if (!attached) throw new Error('packet attachment missing before send');
     submitStage = 'ready-to-send';
-    var send = workPage.locator(
-      // The send button lost its #composer-submit-button id; the composer
-      // form's submit button labelled 보내기 is the same control.
-      ['#composer-submit-button', 'form button[type="submit"][aria-label="보내기"]']
-        .map((base) => base + ':not(:disabled):not([aria-disabled="true"]):not([data-visually-disabled])')
-        .join(', ')
-    );
+    var send = workPage.locator(sendSelector).first();
     await send.waitFor({{ state: 'visible', timeout: 60000 }});
     if (!(await attachmentPresent(10000))) {{
       await fileInput.setInputFiles([{{
@@ -1357,16 +1339,20 @@ var submitState = await Promise.race([
     }}
     return {{ workPage, ownedTargetId: ownedTab.targetId, send, assistantCountBefore, composer }};
     }} catch (error) {{
+      await emitDiag().catch(() => {{}});
       var failMessage = String(error && error.message || error);
       if (failMessage.indexOf('OUTPOST_FAIL stage=') === 0) throw error;
       throw new Error('OUTPOST_FAIL stage=' + submitStage + ' ' + failMessage);
     }}
   }})(),
-  new Promise((_, reject) => setTimeout(
-    () => reject(new Error('OUTPOST_FAIL stage=' + submitStage + ' pre-submit preparation exceeded 110 seconds')),
-    110000
-  ))
+  new Promise((_, reject) => setTimeout(async () => {{
+    if (presubmitDone) return;
+    var timedOutStage = submitStage;
+    await emitDiag().catch(() => {{}});
+    reject(new Error('OUTPOST_FAIL stage=' + timedOutStage + ' pre-submit preparation exceeded 110 seconds'));
+  }}, 110000))
 ]);
+presubmitDone = true;
 var workPage = submitState.workPage;
 if (dryRun) {{
   // The rehearsal is the send path minus the click: it proves every locator the
@@ -1402,11 +1388,11 @@ var remainingSubmitMs = 120000 - (Date.now() - submitStartedAt);
 if (remainingSubmitMs <= 0) throw new Error('pre-submit preparation exceeded 120 seconds');
 submitStage = 'commit-user-turn';
 await submitState.send.click({{ timeout: remainingSubmitMs }});
-var userTurn = workPage.locator('[data-message-author-role="user"]').filter({{ hasText: {js(f"ID: {outpost_id}")} }}).last();
+var userTurn = workPage.locator(userMessageSelector).filter({{ hasText: {js(f"ID: {outpost_id}")} }}).last();
 try {{
   await userTurn.waitFor({{ state: 'visible', timeout: remainingSubmitMs }});
 }} catch (error) {{
-  userTurn = workPage.locator('[data-message-author-role="user"]').last();
+  userTurn = workPage.locator(userMessageSelector).last();
   try {{
     await userTurn.waitFor({{ state: 'visible', timeout: 8000 }});
     var userText = await userTurn.innerText();
@@ -1575,15 +1561,11 @@ async function readAssistantFromBackend() {{
     attachments: lastMeta.attachments || null
   }};
 }}
-var stopButton = workPage.locator(
-  'button[data-testid="stop-button"], button[aria-label*="중지"], button[aria-label*="Stop"]'
-);
-var assistant = workPage.locator('[data-message-author-role="assistant"]').last();
+var stopButton = workPage.locator(stopSelector);
+var assistant = workPage.locator(assistantMessageSelector).last();
 // Live locators: a RegExp name or a heading name never resolves through
 // getByRole() here, and these are re-checked on every poll.
-var copyResponse = workPage.locator(
-  'button[aria-label="응답 복사"], button[aria-label="Copy response"]'
-).last();
+var copyResponse = workPage.locator(copyResponseSelector).last();
 var responseText = '';
 var backendExtracted = null;
 while (Date.now() < responseDeadline) {{
@@ -1605,7 +1587,7 @@ while (Date.now() < responseDeadline) {{
   }}
   // Only use DOM fallback if backend explicitly finished or if backend extraction failed to find anything
   if (!extracted || (!extracted.text && !extracted.finished)) {{
-    if ((await workPage.locator('[data-message-author-role="assistant"]').count()) > assistantCountBefore) {{
+    if ((await workPage.locator(assistantMessageSelector).count()) > assistantCountBefore) {{
       try {{
         await assistant.waitFor({{ state: 'visible', timeout: 1000 }});
         var liveText = (await assistant.innerText()).trim();
@@ -2010,113 +1992,184 @@ def run_repl_outpost(
 
 
 
-def build_doctor_script(*, project_url: str, project_name: str, picker: dict[str, Any] | None = None) -> str:
-    composer_labels = composer_aria_labels(project_name)
-    picker = picker or load_picker_contract()
-    tier_pattern = tier_name_pattern(picker.get("tierAliases") or DEFAULT_TIER_ALIASES)
+# Doctor checks the send path twice. A Pro rehearsal walks every pre-submit
+# step with the Pro stop selected and stops at the click, so it spends no Pro
+# quota. An xhigh send then really goes out and comes back — xhigh quota is not
+# limited — which proves the click, the commit, and the answer recovery too.
+# Any pre-submit step that cannot find its control is handed to the heal loop.
+DOCTOR_TOPIC = "outpost 점검"
+DOCTOR_PACKET = (
+    "# outpost 점검\n\n"
+    "전송 경로를 점검하는 패킷이다. 답변 첫 줄에 ID를 쓰고, 둘째 줄에 '점검 완료'라고만 써 달라.\n"
+)
+DOCTOR_RESPONSE_TIMEOUT_SECONDS = 600
+STAGE_ORDER = tuple(STAGE_HINTS)
+HEALABLE_STAGES = frozenset(STAGE_ORDER[STAGE_ORDER.index("wait-project-composer") : STAGE_ORDER.index("commit-user-turn")])
+
+
+def stage_rank(stage: str) -> int:
+    return STAGE_ORDER.index(stage) if stage in STAGE_ORDER else -1
+
+
+def auto_heal_enabled() -> bool:
+    return os.environ.get("OUTPOST_AUTO_HEAL", "1") != "0"
+
+
+def failure_from_transcript(transcript: str) -> dict[str, Any]:
+    stage, detail = failure_reason_from(transcript)
+    return {
+        "ok": False,
+        "stage": stage or "rehearsal",
+        "detail": detail,
+        "diag": marker_payload(transcript, DIAG_MARKER),
+        "daemonLost": transcript_lost_aside_daemon(transcript),
+    }
+
+
+def healable(failure: dict[str, Any]) -> bool:
+    detail = str(failure.get("detail") or "")
+    return (
+        str(failure.get("stage") or "") in HEALABLE_STAGES
+        and not failure.get("daemonLost")
+        and "rate-limited" not in detail
+    )
+
+
+def rehearse(
+    *,
+    project_url: str,
+    project_name: str,
+    quality: str,
+    conversation_url: str | None = None,
+) -> dict[str, Any]:
+    """Walk the send path for this quality up to the click; never send."""
+    rehearsal_id = secrets.token_hex(8)
+    script = build_repl_script(
+        project_url=project_url,
+        project_name=project_name,
+        quality=quality,
+        packet_name=f"outpost-{rehearsal_id}.md",
+        packet_base64=base64.b64encode(REHEARSAL_PACKET.encode("utf-8")).decode("ascii"),
+        topic=REHEARSAL_TOPIC,
+        outpost_id=rehearsal_id,
+        response_timeout_ms=1000,
+        conversation_url=conversation_url,
+        follow_up=bool(conversation_url),
+        dry_run=True,
+    )
+    transcript = run_repl_process(script, timeout=SUBMIT_TIMEOUT_SECONDS)
+    payload = marker_payload(transcript, REHEARSAL_MARKER)
+    if payload is not None:
+        return {**payload, "ok": True, "stage": "ready-to-send"}
+    return failure_from_transcript(transcript)
+
+
+def build_hide_conversation_script(conversation_id: str) -> str:
     return f"""
-var projectUrl = {js(project_url)};
-var composerLabel = {js(" | ".join(composer_labels))};
-var anyComposerSelector = {js(composer_selector())};
-var projectComposerSelector = {js(composer_selector(composer_labels))};
-var preferredModel = {js(PREFERRED_MODEL_RADIO)};
-var tierSliderNames = {js(list(TIER_SLIDER_NAMES))};
-var tierNameRe = new RegExp({js(tier_pattern)});
-var report = {{
-  url: '',
-  title: '',
-  expectedComposer: composerLabel,
-  composerLabels: [],
-  composerOk: false,
-  chatTogglePresent: false,
-  chatChecked: false,
-  workChecked: false,
-  chatSurfaceOk: false,
-  tierInnerText: [],
-  tierRoleMatched: false,
-  performanceVisible: false,
-  modelMenuVisible: false,
-  latestRadioPresent: false,
-  modelRadios: [],
-  blockers: []
-}};
-{NAME_LOOKUP_HELPERS}
-var page = await openTab(projectUrl);
+var page = await openTab('https://chatgpt.com/');
 await page.waitForLoadState('domcontentloaded');
+var status = 0;
 try {{
-  report.url = page.url();
-  report.title = await page.title();
-  var composer = page.locator(projectComposerSelector);
-  try {{
-    await composer.waitFor({{ state: 'visible', timeout: 30000 }});
-    report.composerOk = true;
-  }} catch (error) {{
-    report.blockers.push('composer');
-  }}
-  report.composerLabels = await page.locator(anyComposerSelector).evaluateAll((els) =>
-    els.map((el) => el.getAttribute('aria-label'))
-  ).catch(() => []);
-  var chatToggle = page.locator('button[data-tpp-toggle-value="chatgpt"]');
-  var workToggle = page.locator('button[data-tpp-toggle-value="work"]');
-  report.chatTogglePresent = await chatToggle.isVisible().catch(() => false);
-  report.chatChecked = report.chatTogglePresent
-    && (await chatToggle.getAttribute('aria-checked')) === 'true';
-  report.workChecked = await workToggle.isVisible().catch(() => false)
-    && (await workToggle.getAttribute('aria-checked')) === 'true';
-  report.chatSurfaceOk = report.chatChecked || (!report.workChecked && report.composerOk);
-  if (!report.chatSurfaceOk) report.blockers.push('chat-surface');
-  report.tierInnerText = await page.locator('button[aria-haspopup="menu"]').evaluateAll((els) =>
-    els.map((el) => (el.innerText || '').replace(/\\s+/g, ' ').trim()).filter(Boolean)
-  ).catch(() => []);
-  // Doctor has to probe the same lookup send uses, or its green light is a lie.
-  // The click-every-menu fallback that used to cover for getByRole() is why
-  // doctor passed while every send died at select-tier.
-  var tierButton = await waitNamedRef(page, 'button', tierNameRe, 20000);
-  report.tierRoleMatched = !!tierButton
-    && await tierButton.isVisible().catch(() => false);
-  if (!report.tierRoleMatched) {{
-    report.blockers.push('tier');
-  }} else {{
-    await tierButton.click();
-    await sleep(800);
-    await snapshot(page, {{ interactive: true }});
-    for (var sliderName of tierSliderNames) {{
-      if (await page.getByRole('menuitem', {{ name: sliderName }}).isVisible().catch(() => false)) {{
-        report.performanceVisible = true;
-        break;
-      }}
-    }}
-    var modelItem = page.getByRole('menuitem', {{ name: '모델 선택' }});
-    report.modelMenuVisible = await modelItem.isVisible().catch(() => false);
-    if (!report.performanceVisible) report.blockers.push('performance');
-    if (!report.modelMenuVisible) {{
-      report.blockers.push('model-menu');
-    }} else {{
-      await modelItem.click();
-      await sleep(500);
-      report.modelRadios = await page.locator('[role="menuitemradio"]').evaluateAll((els) =>
-        els.map((el) => ({{
-          name: (el.getAttribute('aria-label') || el.innerText || '').replace(/\\s+/g, ' ').trim(),
-          checked: el.getAttribute('aria-checked') === 'true'
-        }})).filter((row) => row.name)
-      ).catch(() => []);
-      report.latestRadioPresent = report.modelRadios.some((row) => row.name === preferredModel);
-      if (!report.latestRadioPresent) report.blockers.push('latest');
-    }}
-    await page.keyboard.press('Escape');
-    await page.keyboard.press('Escape');
-  }}
+  var sess = await (await fetch('https://chatgpt.com/api/auth/session')).json();
+  var response = await fetch('https://chatgpt.com/backend-api/conversation/' + {js(conversation_id)}, {{
+    method: 'PATCH',
+    headers: {{ Authorization: 'Bearer ' + sess.accessToken, 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ is_visible: false }})
+  }});
+  status = response.status;
 }} finally {{
   await closeTab(page).catch(() => {{}});
 }}
-report.ok = report.blockers.length === 0
-  && report.composerOk
-  && report.chatSurfaceOk
-  && report.tierRoleMatched
-  && report.performanceVisible
-  && report.latestRadioPresent;
-console.log('OUTPOST_DOCTOR_RESULT ' + JSON.stringify(report));
-"""
+console.log('OUTPOST_HIDE_RESULT ' + JSON.stringify({{ status: status }}));
+""".strip()
+
+
+def live_check(*, project_url: str, project_name: str) -> dict[str, Any]:
+    """Send a throwaway packet on xhigh and read the answer back."""
+    outpost_id = secrets.token_hex(16)
+    script = build_repl_script(
+        project_url=project_url,
+        project_name=project_name,
+        quality="xhigh",
+        packet_name=f"outpost-{outpost_id}.md",
+        packet_base64=base64.b64encode(DOCTOR_PACKET.encode("utf-8")).decode("ascii"),
+        topic=DOCTOR_TOPIC,
+        outpost_id=outpost_id,
+        response_timeout_ms=DOCTOR_RESPONSE_TIMEOUT_SECONDS * 1000,
+    )
+    try:
+        submit, response, _, response_elapsed, _ = run_repl_outpost(
+            script,
+            submit_timeout=SUBMIT_TIMEOUT_SECONDS,
+            response_timeout=DOCTOR_RESPONSE_TIMEOUT_SECONDS,
+            outpost_id=outpost_id,
+        )
+    except SubmitUnknownError as exc:
+        return {"ok": False, "sent": True, "stage": "commit-user-turn", "detail": str(exc)[:200]}
+    except SubmittedResponseError as exc:
+        recovered = recover_outpost_from_backend(
+            outpost_id,
+            conversation_url=str(exc.submit_payload.get("conversationUrl") or "") or None,
+            timeout=DOCTOR_RESPONSE_TIMEOUT_SECONDS,
+        )
+        if not finished_backend_reply(recovered):
+            return {"ok": False, "sent": True, "stage": "await-response", "detail": "answer not recovered"}
+        assert recovered is not None
+        submit, response, response_elapsed = exc.submit_payload, recovered, 0.0
+    except RuntimeError as exc:
+        return {**failure_from_transcript(str(exc)), "sent": False}
+    conversation_url = str(response.get("conversationUrl") or submit.get("conversationUrl") or "")
+    slug = str(response.get("modelSlug") or "") or confirm_model_slug(outpost_id, conversation_url or None)
+    required = QUALITY_MODEL_SLUGS["xhigh"]
+    result = {
+        "ok": slug == required and bool(response.get("idMatched")),
+        "sent": True,
+        "stage": "answered",
+        "tier": str(submit.get("tier") or ""),
+        "modelSlug": slug,
+        "requiredModel": required,
+        "idMatched": bool(response.get("idMatched")),
+        "responseElapsedSeconds": round(float(response_elapsed or 0), 1),
+    }
+    if not result["ok"]:
+        result["detail"] = (
+            f"answered by {slug or 'unknown'} (want {required}), idMatched={result['idMatched']}"
+        )
+    conversation_id = conversation_id_from_url(conversation_url)
+    if conversation_id:
+        hidden = marker_payload(
+            run_repl_process(build_hide_conversation_script(conversation_id), timeout=60),
+            "OUTPOST_HIDE_RESULT ",
+        )
+        result["cleanedUp"] = bool(hidden and hidden.get("status") == 200)
+    return result
+
+
+def heal_screen_map(
+    failure: dict[str, Any],
+    verify: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    return UI.heal(
+        failure=failure,
+        verify=verify,
+        stage_rank=stage_rank,
+        stage_hint=lambda stage: STAGE_HINTS.get(stage, ""),
+        log=lambda line: print(line, file=sys.stderr, flush=True),
+    )
+
+
+def format_step(name: str, result: dict[str, Any]) -> str:
+    state = "ok" if result.get("ok") else "FAIL"
+    line = f"{name} {state} stage={result.get('stage') or '-'}"
+    if result.get("tier"):
+        line += f" tier={result['tier']}"
+    if result.get("modelSlug"):
+        line += f" model={result['modelSlug']}"
+    if result.get("healed"):
+        line += f" healed_in={result['healed']}"
+    if not result.get("ok") and result.get("detail"):
+        line += f"\n  detail={result['detail']}"
+    return line
 
 
 def format_doctor_report(payload: dict[str, Any]) -> str:
@@ -2126,33 +2179,27 @@ def format_doctor_report(payload: dict[str, Any]) -> str:
         f"daemon up={payload.get('daemonUptime') or 'unknown'} "
         f"pid={payload.get('daemonPid') or '-'}",
     ]
-    if payload.get("stage") == "ready-to-send":
-        lines.extend(
-            [
-                f"rehearsal stage=ready-to-send url={payload.get('url') or '-'}",
-                f"composer expected={payload.get('expectedComposer') or '-'} "
-                f"found={json.dumps(payload.get('composerLabels') or [], ensure_ascii=False)}",
-                f"tier expected={payload.get('tierLabel') or '-'} "
-                f"verified={payload.get('tier') or '-'}",
-                f"model expected={payload.get('model') or '-'} "
-                f"present={'true' if payload.get('latestRadioPresent') else 'false'}",
-                f"radios={json.dumps(payload.get('modelRadios') or [], ensure_ascii=False)}",
-            ]
-        )
-    else:
-        lines.append(f"rehearsal stage={payload.get('stage') or '-'}")
-        if payload.get("detail"):
-            lines.append(f"detail={payload['detail']}")
-        if payload.get("pickerProbe"):
-            lines.append(
-                "picker probe="
-                + json.dumps(payload["pickerProbe"].get("tierInnerText") or [], ensure_ascii=False)
-            )
+    for name in ("pro", "xhigh"):
+        step = payload.get(name)
+        if step:
+            lines.append(format_step("pro-rehearsal" if name == "pro" else "xhigh-send", step))
+    if payload.get("uiMap"):
+        lines.append(f"screen map {payload['uiMap']}")
     blockers = payload.get("blockers") or []
     if blockers:
         lines.append("blockers=" + ",".join(str(b) for b in blockers))
     if not ok:
-        lines.append("exit 75 — 리허설이 전송 직전까지 가지 못했다. 패킷은 보내지 않음.")
+        failed = [
+            str(step.get("stage") or "")
+            for step in (payload.get("pro"), payload.get("xhigh"))
+            if step and not step.get("ok")
+        ]
+        if not failed:
+            lines.append("exit 75 — Aside 데몬이 준비되지 않았다. 잠시 뒤 다시 돌려라.")
+        elif any(stage_rank(stage) >= 0 or stage in {"answered", "await-response"} for stage in failed):
+            lines.append("exit 75 — 전송 경로가 막혀 있고 자동 수리로도 풀리지 않았다. 코드 수정이 필요하다.")
+        else:
+            lines.append("exit 75 — Aside가 스크립트를 돌리지 못했다. 화면 문제가 아니다; 잠시 뒤 다시 돌려라.")
     return "\n".join(lines)
 
 
@@ -2181,76 +2228,64 @@ def run_doctor(args: argparse.Namespace) -> int:
         print(daemon_error, file=sys.stderr)
         return 75
     health = aside_daemon_health()
-    # Doctor walks the send path itself, with a throwaway packet, and stops at
-    # the click. Its green light is the send's own pre-submit path, so it can no
-    # longer pass on a lookup the send cannot perform.
-    rehearsal_id = secrets.token_hex(8)
-    script = build_repl_script(
-        project_url=project_url,
-        project_name=project_name,
-        quality="pro",
-        packet_name=f"outpost-{rehearsal_id}.md",
-        packet_base64=base64.b64encode(REHEARSAL_PACKET.encode("utf-8")).decode("ascii"),
-        topic=REHEARSAL_TOPIC,
-        outpost_id=rehearsal_id,
-        response_timeout_ms=1000,
-        picker=load_picker_contract(),
-        dry_run=True,
-    )
-    transcript = run_repl_process(script, timeout=SUBMIT_TIMEOUT_SECONDS)
-    payload = marker_payload(transcript, REHEARSAL_MARKER)
-    wrote = None
-    if payload is not None:
-        payload = dict(payload)
-        contract = picker_from_doctor_payload(payload)
-        if contract is not None:
-            wrote = save_picker_contract(contract)
-            payload["pickerPath"] = str(wrote)
-            payload["picker"] = contract
+    heal = auto_heal_enabled() and not args.no_heal
+    payload: dict[str, Any] = {"blockers": []}
+
+    def once_more_if_aside_failed(check: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        result = check()
+        # No stage means the script never ran a step: Aside was not answering,
+        # not a changed screen. Wait for the daemon and run it once more.
+        if (
+            not result.get("ok")
+            and not result.get("sent")
+            and stage_rank(str(result.get("stage") or "")) < 0
+            and ensure_aside_daemon() is None
+        ):
+            result = check()
+        return result
+
+    def check_pro() -> dict[str, Any]:
+        return once_more_if_aside_failed(
+            lambda: rehearse(project_url=project_url, project_name=project_name, quality="pro")
+        )
+
+    def check_live() -> dict[str, Any]:
+        return once_more_if_aside_failed(
+            lambda: live_check(project_url=project_url, project_name=project_name)
+        )
+
+    def check_xhigh_dry() -> dict[str, Any]:
+        return rehearse(project_url=project_url, project_name=project_name, quality="xhigh")
+
+    pro = check_pro()
+    if not pro.get("ok") and heal and healable(pro):
+        healed = heal_screen_map(pro, check_pro)
+        pro = {**healed["result"], "healed": healed["attempts"]} if healed["ok"] else healed["result"]
+    payload["pro"] = {k: v for k, v in pro.items() if k != "diag"}
+    if not pro.get("ok"):
+        payload["blockers"].append("pro-rehearsal")
     else:
-        stage, detail = failure_reason_from(transcript)
-        payload = {
-            "ok": False,
-            "stage": stage or "rehearsal",
-            "detail": detail,
-            "blockers": ["rehearsal"],
-        }
-        # A renamed picker is the one drift the saved contract can absorb by
-        # itself, so read the live names before reporting it as a code problem.
-        if stage in {"select-tier", "verify-model"}:
-            probe = marker_payload(
-                run_repl_process(
-                    build_doctor_script(project_url=project_url, project_name=project_name),
-                    timeout=60,
-                ),
-                DOCTOR_MARKER,
-            )
-            if probe is not None:
-                payload["pickerProbe"] = probe
-                payload["url"] = probe.get("url") or ""
-                contract = picker_from_doctor_payload(probe)
-                if contract is not None:
-                    wrote = save_picker_contract(contract)
-                    payload["pickerPath"] = str(wrote)
-    # A reachable daemon is not a usable one: the browser behind it may still be
-    # starting, which is how a send dies right after a restart.
+        live = check_live()
+        if not live.get("ok") and not live.get("sent") and heal and healable(live):
+            healed = heal_screen_map(live, check_xhigh_dry)
+            if healed["ok"]:
+                live = {**check_live(), "healed": healed["attempts"]}
+            else:
+                live = healed["result"]
+        payload["xhigh"] = {k: v for k, v in live.items() if k != "diag"}
+        if not live.get("ok"):
+            payload["blockers"].append("xhigh-send")
+    payload["uiMap"] = str(UI.ui_map_path())
     payload["daemonUptime"] = format_daemon_uptime(health)
     payload["daemonPid"] = health.get("pid") if health else None
     if health is not None and health.get("ready") is not True:
-        payload["blockers"] = list(payload.get("blockers") or []) + ["daemon-not-ready"]
-        payload["ok"] = False
+        payload["blockers"].append("daemon-not-ready")
+    payload["ok"] = not payload["blockers"]
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(format_doctor_report(payload))
-        if wrote is not None:
-            print(f"OUTPOST_PICKER wrote {wrote}")
-    if payload.get("ok"):
-        return 0
-    if wrote is not None:
-        print("exit 0 — 피커 계약을 갱신했으니 다음 send는 이 이름을 쓴다.")
-        return 0
-    return 75
+    return 0 if payload["ok"] else 75
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -2288,7 +2323,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--doctor",
         action="store_true",
-        help="Probe ChatGPT UI without sending a packet.",
+        help="Rehearse Pro, send one xhigh round trip, and heal the screen map on failure.",
+    )
+    parser.add_argument(
+        "--no-heal",
+        action="store_true",
+        help="Doctor only reports; it does not rewrite the screen map.",
     )
     parser.add_argument(
         "--thread",
@@ -2752,33 +2792,73 @@ def main(argv: Sequence[str]) -> int:
                     packet_path=packet_source,
                     pid=os.getpid(),
                 )
-            (
-                submit_payload,
-                response_payload,
-                submit_elapsed,
-                response_elapsed,
-                transcript,
-            ) = run_repl_outpost(
-                build_repl_script(
-                    project_url=project_url,
-                    project_name=project_name,
-                    quality=args.quality,
-                    packet_name=f"outpost-{outpost_id}.md",
-                    packet_base64=packet_base64,
-                    topic=topic,
+            def send_once():
+                # The script is rebuilt on every attempt so a healed screen map
+                # is what the retry looks up.
+                return run_repl_outpost(
+                    build_repl_script(
+                        project_url=project_url,
+                        project_name=project_name,
+                        quality=args.quality,
+                        packet_name=f"outpost-{outpost_id}.md",
+                        packet_base64=packet_base64,
+                        topic=topic,
+                        outpost_id=outpost_id,
+                        response_timeout_ms=args.response_timeout * 1000,
+                        artifact_output=str(artifact_path) if artifact_path else None,
+                        conversation_url=conversation_url,
+                        follow_up=follow_up,
+                        uploads=uploads,
+                    ),
+                    submit_timeout=SUBMIT_TIMEOUT_SECONDS,
+                    response_timeout=args.response_timeout,
                     outpost_id=outpost_id,
-                    response_timeout_ms=args.response_timeout * 1000,
-                    artifact_output=str(artifact_path) if artifact_path else None,
-                    conversation_url=conversation_url,
-                    follow_up=follow_up,
-                    picker=load_picker_contract(),
-                    uploads=uploads,
-                ),
-                submit_timeout=SUBMIT_TIMEOUT_SECONDS,
-                response_timeout=args.response_timeout,
-                outpost_id=outpost_id,
-                on_submit=mark_submitted,
-            )
+                    on_submit=mark_submitted,
+                )
+
+            try:
+                (
+                    submit_payload,
+                    response_payload,
+                    submit_elapsed,
+                    response_elapsed,
+                    transcript,
+                ) = send_once()
+            except RuntimeError as first:
+                # A plain RuntimeError here means the packet was not sent, so
+                # healing the screen map and sending again cannot double-send.
+                if isinstance(first, (SubmitUnknownError, SubmittedResponseError)):
+                    raise
+                failure = failure_from_transcript(str(first))
+                if not (auto_heal_enabled() and healable(failure)):
+                    raise
+                print(
+                    f"OUTPOST_HEAL start stage={failure['stage']} — 전송 전 단계라 보낸 것은 없다. "
+                    "화면 지도를 고친 뒤 한 번 다시 보낸다.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                healed = heal_screen_map(
+                    failure,
+                    lambda: rehearse(
+                        project_url=project_url,
+                        project_name=project_name,
+                        quality=args.quality,
+                        conversation_url=conversation_url,
+                    ),
+                )
+                if not healed["ok"]:
+                    raise RuntimeError(
+                        f"{first}\n\n자동 수리 {healed['attempts']}회로도 풀리지 않았다 "
+                        f"(마지막 단계 {healed['result'].get('stage') or '-'})."
+                    ) from first
+                (
+                    submit_payload,
+                    response_payload,
+                    submit_elapsed,
+                    response_elapsed,
+                    transcript,
+                ) = send_once()
     except SESSIONS.ThreadBusyError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -2941,6 +3021,9 @@ def main(argv: Sequence[str]) -> int:
         stderr_path.write_text(str(exc), encoding="utf-8")
         print(str(exc), file=sys.stderr)
         stage, detail = failure_reason_from(exc)
+        # Nothing went out, so the run directory must not look sent: a resend of
+        # the same packet is the fix, not a duplicate.
+        write_pending({"ok": False, "status": "not_sent", "failureStage": stage or "pre-submit"})
         record_thread_outcome(
             store,
             thread,

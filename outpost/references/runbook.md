@@ -39,33 +39,55 @@ not a recoverable default.
 
 ## Doctor
 
-Rehearse the whole send path without spending a turn:
-
 ```bash
-outpost doctor
+outpost doctor            # check, and heal the screen map if a step broke
+outpost doctor --no-heal  # check and report only
 outpost doctor --json
 ```
 
-Doctor runs the send's own `build_repl_script(dry_run=True)` with a throwaway
-packet: it opens the configured project, picks the tier and model, fills the
-composer, attaches the packet, and waits for the send button — then clears the
-draft, closes the tab, and stops. It never clicks send, so no turn is spent and
-no conversation is created. A green doctor therefore means the send reaches the
-click; a red one names the stage that failed.
+Doctor checks the send path twice:
+
+1. **Pro rehearsal.** The send's own `build_repl_script(dry_run=True)` with a
+   throwaway packet: open the project, select the `Pro` stop and `최신`, fill
+   the composer, attach, wait for an enabled send button, then clear the draft
+   and stop. No Pro turn is spent.
+2. **xhigh send.** A real throwaway packet on `xhigh` (not quota-limited): click,
+   commit, and read the answer back through the backend. It passes when the
+   answer echoes the ID and the backend reports `gpt-5-6-thinking`. The
+   conversation is hidden afterwards.
 
 It reports the daemon first (`daemon up=… pid=…`). Aside's app restarts every
 day or two, and a send that lands in that window dies with `other side closed`,
 so a daemon that is not `ready` blocks. `ensure_aside_daemon()` also waits for a
-just-restarted daemon to settle before a send starts.
+just-restarted daemon to settle before a send starts. Exit `0` when both checks
+pass; exit `75` otherwise.
 
-The rehearsal also reports the live picker names, and doctor writes
-`~/.codex/outpost-picker.json` from them so the next send follows the UI instead
-of waiting for a code patch. Exit `0` when the rehearsal reached the click or
-the contract was refreshed; exit `75` otherwise.
+### Screen map and heal
 
-A renamed picker is the one drift the contract absorbs on its own. When the
-rehearsal fails at `select-tier` or `verify-model`, doctor runs the older
-locator-only probe to read the names the live page actually uses.
+Every selector and accessible name the send path looks up lives in one screen
+map: built-in defaults in `scripts/outpost_ui.py` plus what doctor learned in
+`~/.codex/outpost-ui.json` (`OUTPOST_UI_MAP_PATH`). Saved names are tried
+first and the defaults still work after them. A saved map that does not parse
+is ignored.
+
+A pre-submit step that fails prints `OUTPOST_DIAG` with the page at that moment
+(interactive snapshot tree and an outline of the composer form, menus and
+toggles). Aside drops the whole output of a script that ends in an error once it
+passes roughly 16–20 KB, so the report is capped well under that. Doctor hands that page to a heal model — `rubato -p` with
+`b-ai/deepseek-v4.1-flash` by default (`OUTPOST_HEAL_MODEL`, `OUTPOST_HEAL_BIN`) —
+which may rewrite only the saved map. Each rewrite is rehearsed again and kept
+only when the path gets further; otherwise it is undone and the next try is told
+what failed. A screen change that breaks several steps is healed one step at a
+time. A step is given up after three tries without progress, twelve tries in
+all. The map validator refuses a `Pro` stop under `xhigh` and a `Sol` model.
+
+Rate limits, a lost daemon, and anything after the click are not screen
+changes and are never healed. A check that failed before any step ran means
+Aside was not answering; doctor waits for the daemon and runs it once more.
+If the process dies mid-heal, the next read of the map restores the last map
+it had verified. A change in the flow itself — a new dialog, a new
+step — is beyond the map; doctor then stays red and names the stage, and the
+code needs a patch.
 
 ## Launch the fast path
 
@@ -196,13 +218,10 @@ submitElapsedSeconds: <120
 For `--quality xhigh`, the same shape with `tier: Extra High (N of M)` and
 `modelSlug: gpt-5-6-thinking`.
 
-The project banner toggle is `button[data-tpp-toggle-value="chatgpt"|"work"]`.
-Switch to Chat before the picker. Work mode is not a outpost surface.
-The Chat slider stops are `Instant` `Medium` `High` `Extra High` `Pro`, under
-the `파워` menuitem. The closed composer pill is named `ChatGPT 모델 선택` and
-shows the current tier as its text; older UIs named it by the tier (`NPro`,
-`매우 높음`), and those names are still accepted. Match the requested label; do not operate the Work-mode
-`최신` Chat picker; never `GPT-5.6 Sol`.
+Switch to Chat before the picker. Work mode is not a outpost surface. The
+current names of the banner toggle, the tier pill, the slider and its stops
+live in the screen map. Match the requested stop; do not operate the Work-mode
+picker; never `GPT-5.6 Sol`.
 
 Reject an unverified model or tier, an empty assistant body, or a
 submission at or above 120 seconds. A missing ID echo in the assistant
@@ -210,11 +229,15 @@ text is not a reject if the user turn committed and the reply was saved.
 
 Reject an answer that does not address the attached packet.
 
-On exit `75` caused by pre-send UI drift, preserve evidence and stop. Do not
-hand the packet to another sender. Outpost has one continuous Aside REPL path.
+A send that fails before the click at a screen step heals the screen map the
+same way doctor does, then sends once more: nothing went out, so this cannot
+double-send. `OUTPOST_AUTO_HEAL=0` turns it off. If the heal does not get
+through, the send exits `75` and `result.json` says `status: not_sent`, so the
+same packet may be sent again once the path is fixed. Do not hand the packet to
+another sender. Outpost has one continuous Aside REPL path.
 Playwright is not part of Outpost, including code artifact generation and
-download. A deliberate resend is a new project conversation and must never
-happen automatically.
+download. A deliberate resend after the click is a new project conversation and never
+happens automatically.
 
 
 ## Recover without resend
@@ -268,7 +291,8 @@ submitted_pending`, `id`, and `packetSha`. If the REPL dies, Aside restarts,
 or the parent is killed, `outpost recover .outpost/<run>` finds the turn by id
 through the backend and saves the answer. A second `send` with the same packet
 in the same run directory exits `79` instead of spending another Pro turn;
-`OUTPOST_FORCE=1` is the deliberate override.
+`OUTPOST_FORCE=1` is the deliberate override. A send that failed before the
+click rewrites the file to `status: not_sent`, which the guard lets through.
 
 ## Input attachments
 

@@ -45,7 +45,7 @@ class ConsultAsideContractTest(unittest.TestCase):
         self.assertRegex(runbook, r'outpost"? doctor')
         self.assertNotIn("/Users/wy", runbook)
         self.assertNotIn("harness/skills/outpost/scripts", runbook)
-        self.assertIn("outpost-picker.json", runbook)
+        self.assertIn("outpost-ui.json", runbook)
         self.assertIn("under 120 seconds", runbook)
         self.assertIn("submitElapsedSeconds", runbook)
         self.assertIn("same project page", runbook)
