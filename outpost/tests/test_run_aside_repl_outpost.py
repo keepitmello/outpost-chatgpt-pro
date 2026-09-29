@@ -658,7 +658,7 @@ printf '%s\\n' 'ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseTe
                 [
                     "--quality", "xhigh",
                     "--packet", str(packet),
-                    "--url", "https://chatgpt.com/g/g-p-6aaca158e64c81919ac0c301817372a7/project",
+                    "--url", "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project",
                     "--project", "커리어",
                     "--response-output", str(root / "response.md"),
                     "--json-output", str(result_path),
@@ -731,7 +731,7 @@ printf '%s\\n' 'ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseTe
             )
             self.assertEqual(code, 76)
             self.assertEqual(result["status"], "submit_unknown")
-            self.assertEqual(result["projectUrl"], "https://chatgpt.com/g/g-p-6aaca158e64c81919ac0c301817372a7/project")
+            self.assertEqual(result["projectUrl"], "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project")
             self.assertIn("do not retry", stderr)
             again, _, _ = self._send(root, path, locate_outpost_turn={"return_value": ("unknown", None)})
             self.assertEqual(again, MODULE.DUPLICATE_SEND_EXIT)
@@ -774,13 +774,13 @@ printf '%s\\n' 'ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseTe
         script = MODULE.build_backend_recovery_script(
             "abc123",
             None,
-            project_url="https://chatgpt.com/g/g-p-6aaca158e64c81919ac0c301817372a7/project",
+            project_url="https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project",
             since=1790662000,
             until_found=True,
         )
         # Project conversations are missing from the account-wide list.
         self.assertIn("/backend-api/gizmos/' + projectGizmoId + '/conversations", script)
-        self.assertIn('var projectGizmoId = "g-p-6aaca158e64c81919ac0c301817372a7";', script)
+        self.assertIn('var projectGizmoId = "g-p-0123456789abcdef0123456789abcdef";', script)
         self.assertIn("var untilFound = true;", script)
         self.assertIn("searched: searched", script)
         # A list with more pages only covers the send once it reaches past its start.
@@ -819,7 +819,7 @@ printf '%s\\n' 'ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseTe
                 ) as locate, mock.patch.object(MODULE, "recover_outpost_from_backend", recover):
                     code = MODULE.main([
                         "--recover-from", str(evidence),
-                        "--url", "https://chatgpt.com/g/g-p-6aaca158e64c81919ac0c301817372a7/project",
+                        "--url", "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project",
                         "--response-output", str(root / "response.md"),
                         "--json-output", str(evidence),
                         "--stderr-output", str(root / "recover.stderr.log"),
@@ -827,7 +827,7 @@ printf '%s\\n' 'ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseTe
                 self.assertEqual(code, expected_code)
                 self.assertEqual(
                     locate.call_args.kwargs["project_url"],
-                    "https://chatgpt.com/g/g-p-6aaca158e64c81919ac0c301817372a7/project",
+                    "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project",
                 )
                 saved = json.loads(evidence.read_text(encoding="utf-8"))
                 if expected_status is None:
