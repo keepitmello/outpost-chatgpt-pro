@@ -201,7 +201,8 @@ class ModelAndLossGuardTest(unittest.TestCase):
             during = root / "result.during.json"
             fake.write_text(
                 "#!/usr/bin/env python3\nimport shutil\n"
-                f"shutil.copyfile({str(result_path)!r}, {str(during)!r})\nprint('nothing')\n",
+                f"shutil.copyfile({str(result_path)!r}, {str(during)!r})\n"
+                "print('Error: OUTPOST_FAIL stage=select-tier tier button not visible')\n",
                 encoding="utf-8",
             )
             fake.chmod(0o755)
@@ -226,6 +227,9 @@ class ModelAndLossGuardTest(unittest.TestCase):
             self.assertEqual(pending["status"], "submitted_pending")
             self.assertTrue(pending["id"])
             self.assertTrue(pending["packetSha"])
+            # recover can find the turn by its id in this project later
+            self.assertEqual(pending["projectUrl"], "https://chatgpt.com/g/g-p-test-work/project")
+            self.assertTrue(pending["startedAt"])
             # this send died before the click, so the run must not look sent:
             # sending the same packet again is the fix, not a duplicate (exit 79)
             final = json.loads(result_path.read_text(encoding="utf-8"))

@@ -55,6 +55,9 @@ DIAG_MARKER = "OUTPOST_DIAG "
 # has to fit well under that next to the error itself.
 DIAG_TREE_LIMIT = 7000
 DIAG_OUTLINE_LIMIT = 4000
+# After a send click that threw, how long the page may take to show the user
+# turn before the runner asks the backend instead.
+CLICK_ERROR_TURN_WAIT_MS = 20_000
 # The REPL drops a top-level `return`: the script then stops silently partway,
 # with no error and no output. The rehearsal ends with a sentinel throw instead.
 REHEARSAL_STOP = "OUTPOST_REHEARSAL_STOP"
@@ -92,7 +95,16 @@ QUALITY_MODEL_SLUGS: dict[str, str] = {
 QUALITIES = tuple(QUALITY_MODEL_SLUGS)
 WRONG_MODEL_EXIT = 78
 DUPLICATE_SEND_EXIT = 79
+NOT_SENT_EXIT = 75
+SUBMIT_UNKNOWN_EXIT = 76
 CONVERSATION_ID_RE = re.compile(r"/c/([0-9a-fA-F-]{8,})")
+PROJECT_GIZMO_RE = re.compile(r"^/g/(g-p-[0-9a-fA-F]+)")
+# How long the backend is polled for a turn before "not there" counts as not
+# sent: a click that landed a moment before the REPL died is still committing.
+LOCATE_TIMEOUT_SECONDS = 20
+# A lookup only reads project conversations touched this long before the send
+# started, so it stays a handful of reads even in a busy project.
+LOCATE_SINCE_SLACK_SECONDS = 120
 KOREAN_UPLOAD_PREAMBLE = (
     "첨부한 독립형 컨텍스트 패킷을 검토하고, 그 안의 질문이나 작업에 답해 주세요.\n\n"
     "이 패킷 외의 저장소, 터미널, 이전 대화는 볼 수 없다고 가정하세요. "
@@ -615,10 +627,16 @@ def build_backend_recovery_script(
     *,
     timeout_ms: int = 45_000,
     poll_interval_ms: int = 5_000,
+    project_url: str | None = None,
+    since: float = 0,
+    until_found: bool = False,
 ) -> str:
     return f"""
 var outpostId = {js(outpost_id)};
 var conversationUrl = {js(conversation_url or "")};
+var projectGizmoId = {js(project_gizmo_id(project_url))};
+var since = {float(since or 0)};
+var untilFound = {js(bool(until_found))};
 var deadline = Date.now() + {int(timeout_ms)};
 var pollIntervalMs = {int(poll_interval_ms)};
 var recoveredModelSlug = '';
@@ -735,25 +753,83 @@ function userHasId(payload) {{
     return node && node.message && node.message.author && node.message.author.role === 'user' && messageText(node.message).includes(outpostId);
   }});
 }}
-async function findConversation() {{
-  var payload = conversationId ? await readConversation(conversationId) : null;
-  if (payload && userHasId(payload)) return payload;
-  var list = await fetch('https://chatgpt.com/backend-api/conversations?offset=0&limit=15&order=updated', auth);
-  if (!list.ok) return payload && userHasId(payload) ? payload : null;
-  var items = (await list.json()).items || [];
+// A project conversation is missing from the account-wide list, so the
+// project's own list is where a new turn is found. `searched` is true only when
+// every place the turn could be was read, so "not found" there means not sent.
+var searched = false;
+function touchedAt(item) {{
+  var stamp = item.update_time || item.create_time || 0;
+  return typeof stamp === 'number' ? stamp : Date.parse(stamp) / 1000;
+}}
+function recentEnough(item) {{
+  return !since || !(touchedAt(item) < since);
+}}
+async function scanList(url) {{
+  var list = await fetch(url, auth).catch(function () {{ return null; }});
+  if (!list || !list.ok) return {{ complete: false, payload: null }};
+  var body = await list.json().catch(function () {{ return null; }});
+  var items = body && body.items;
+  if (!Array.isArray(items)) return {{ complete: false, payload: null }};
+  // The list is newest first. It covers the send only when it reaches past the
+  // send's start or has no further page.
+  var complete = !body.cursor || (since > 0 && items.some(function (item) {{
+    return item && touchedAt(item) < since;
+  }}));
   for (var i = 0; i < items.length; i += 1) {{
-    payload = await readConversation(items[i].id);
-    if (payload && userHasId(payload)) {{
+    if (!items[i] || !items[i].id || !recentEnough(items[i])) continue;
+    var candidate = await readConversation(items[i].id).catch(function () {{ return null; }});
+    if (!candidate) {{
+      complete = false;
+      continue;
+    }}
+    if (userHasId(candidate)) {{
       conversationId = items[i].id;
-      return payload;
+      return {{ complete: true, payload: candidate }};
     }}
   }}
+  return {{ complete: complete, payload: null }};
+}}
+async function findConversation() {{
+  searched = false;
+  // The saved conversation first, then the one an earlier poll found.
+  var savedId = conversationId;
+  if (savedId) {{
+    var saved = await readConversation(savedId).catch(function () {{ return null; }});
+    if (saved && userHasId(saved)) {{
+      conversationId = savedId;
+      return saved;
+    }}
+    // A follow-up turn can only land in its saved conversation.
+    if (saved && !projectGizmoId) searched = true;
+  }}
+  if (projectGizmoId) {{
+    var project = await scanList('https://chatgpt.com/backend-api/gizmos/' + projectGizmoId + '/conversations?cursor=0');
+    if (project.payload) return project.payload;
+    searched = project.complete;
+  }}
+  var global = await scanList('https://chatgpt.com/backend-api/conversations?offset=0&limit=15&order=updated');
+  if (global.payload) return global.payload;
   return null;
 }}
-var last = {{ ok: false }};
+var last = {{ ok: false, found: false, searched: false }};
 while (Date.now() < deadline) {{
   var payload = await findConversation();
   if (payload && conversationId) {{
+    if (untilFound) {{
+      var located = assistantFrom(payload);
+      last = {{
+        ok: true,
+        found: true,
+        searched: true,
+        responseText: located.text,
+        finished: located.finished,
+        idMatched: located.text.includes(outpostId),
+        conversationUrl: 'https://chatgpt.com/c/' + conversationId,
+        conversationId: conversationId,
+        modelSlug: recoveredModelSlug
+      }};
+      break;
+    }}
     var extracted = assistantFrom(payload);
     var writingArtifacts = [];
     if (extracted.writingBlocks) {{
@@ -796,6 +872,8 @@ while (Date.now() < deadline) {{
     }}
     last = {{
       ok: true,
+      found: true,
+      searched: true,
       responseText: extracted.text,
       finished: extracted.finished,
       idMatched: extracted.text.includes(outpostId),
@@ -806,6 +884,8 @@ while (Date.now() < deadline) {{
       modelSlug: recoveredModelSlug
     }};
     if (extracted.text && extracted.finished) break;
+  }} else if (!last.found) {{
+    last = {{ ok: false, found: false, searched: searched }};
   }}
   await sleep(pollIntervalMs);
 }}
@@ -814,13 +894,23 @@ console.log({js(BACKEND_RECOVERY_MARKER)} + JSON.stringify(last));
 """.strip()
 
 
-def recover_outpost_from_backend(
+def project_gizmo_id(project_url: str | None) -> str:
+    """The `g-p-...` id of a project URL; the project's conversation list is keyed by it."""
+    match = PROJECT_GIZMO_RE.search(urlparse(project_url or "").path)
+    return match.group(1) if match else ""
+
+
+def backend_lookup(
     outpost_id: str,
     conversation_url: str | None = None,
     *,
     timeout: int = 45,
     poll_interval: int = 5,
+    project_url: str | None = None,
+    since: float = 0,
+    until_found: bool = False,
 ) -> dict[str, Any] | None:
+    """What the backend knows about the turn carrying this id; None when it could not be asked."""
     if not outpost_id:
         return None
     transcript = run_repl_process(
@@ -829,13 +919,65 @@ def recover_outpost_from_backend(
             conversation_url,
             timeout_ms=max(1, int(timeout)) * 1000,
             poll_interval_ms=max(1, int(poll_interval)) * 1000,
+            project_url=project_url,
+            since=since,
+            until_found=until_found,
         ),
         timeout=max(1, int(timeout)) + 15,
     )
-    payload = marker_payload(transcript, BACKEND_RECOVERY_MARKER)
+    return marker_payload(transcript, BACKEND_RECOVERY_MARKER)
+
+
+def recover_outpost_from_backend(
+    outpost_id: str,
+    conversation_url: str | None = None,
+    *,
+    timeout: int = 45,
+    poll_interval: int = 5,
+    project_url: str | None = None,
+    since: float = 0,
+) -> dict[str, Any] | None:
+    payload = backend_lookup(
+        outpost_id,
+        conversation_url,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        project_url=project_url,
+        since=since,
+    )
     if not payload or not payload.get("ok"):
         return None
     return payload
+
+
+def locate_outpost_turn(
+    outpost_id: str,
+    *,
+    project_url: str | None = None,
+    conversation_url: str | None = None,
+    since: float = 0,
+    timeout: int = LOCATE_TIMEOUT_SECONDS,
+) -> tuple[str, dict[str, Any] | None]:
+    """Ground truth for "was it sent": `found`, `absent` or `unknown`.
+
+    `absent` needs a complete read of every place the turn could be — the saved
+    conversation for a follow-up, the project list for a new chat — polled long
+    enough for a turn that was still committing. Anything less is `unknown`.
+    """
+    payload = backend_lookup(
+        outpost_id,
+        conversation_url,
+        timeout=timeout,
+        poll_interval=5,
+        project_url=project_url,
+        since=since,
+        until_found=True,
+    )
+    if payload and payload.get("found") and payload.get("conversationUrl"):
+        return "found", payload
+    if payload and payload.get("searched"):
+        return "absent", payload
+    return "unknown", payload
 
 
 def finished_backend_reply(payload: dict[str, Any] | None) -> bool:
@@ -952,6 +1094,7 @@ var modelMenuNames = {js(list(ui["modelMenuNames"]))};
 var tierPositionRe = new RegExp({js(ui["tierPositionPattern"])});
 var quality = {js(quality)};
 var packetName = {js(packet_name)};
+var packetStem = {js(packet_name.rsplit(".", 1)[0])};
 var packetBase64 = {js(packet_base64)};
 var extraUploads = {js(list(uploads or []))};
 var artifactRequested = {js(artifact_output is not None)};
@@ -1297,7 +1440,9 @@ var submitState = await Promise.race([
       var attachDeadline = Date.now() + timeoutMs;
       while (true) {{
         if (await waitRole(workPage, 'group', attachmentName, 0)) return true;
-        if ((await bodyTextOf(workPage)).indexOf(packetName) !== -1) return true;
+        // ChatGPT renames a name it has seen before to `outpost-<id>(1).md`,
+        // so match the name without its extension.
+        if ((await bodyTextOf(workPage)).indexOf(packetStem) !== -1) return true;
         if (Date.now() >= attachDeadline) return false;
         await sleep(1000);
       }}
@@ -1387,11 +1532,34 @@ var assistantCountBefore = submitState.assistantCountBefore || 0;
 var remainingSubmitMs = 120000 - (Date.now() - submitStartedAt);
 if (remainingSubmitMs <= 0) throw new Error('pre-submit preparation exceeded 120 seconds');
 submitStage = 'commit-user-turn';
-await submitState.send.click({{ timeout: remainingSubmitMs }});
+// Aside resolves a locator once when it clicks and never waits: a send button
+// that is disabled for a moment is "not found" and nothing is clicked.
+await submitState.send.waitFor({{
+  state: 'visible',
+  timeout: Math.max(1, Math.min(30000, 120000 - (Date.now() - submitStartedAt)))
+}}).catch(() => {{}});
+// A click that throws proves nothing either way: the turn may already be out.
+// The page decides below, and the runner asks the backend when it cannot.
+var clickError = '';
+try {{
+  await submitState.send.click({{ timeout: Math.max(1, 120000 - (Date.now() - submitStartedAt)) }});
+}} catch (error) {{
+  clickError = String(error && error.message || error).slice(0, 300);
+}}
+remainingSubmitMs = Math.max(1, 120000 - (Date.now() - submitStartedAt));
 var userTurn = workPage.locator(userMessageSelector).filter({{ hasText: {js(f"ID: {outpost_id}")} }}).last();
 try {{
-  await userTurn.waitFor({{ state: 'visible', timeout: remainingSubmitMs }});
+  await userTurn.waitFor({{
+    state: 'visible',
+    timeout: clickError ? Math.min({CLICK_ERROR_TURN_WAIT_MS}, remainingSubmitMs) : remainingSubmitMs
+  }});
 }} catch (error) {{
+  if (clickError) {{
+    throw new Error(
+      'OUTPOST_FAIL stage=commit-user-turn send click failed and no user turn showed on the page: ' +
+      clickError + ' url=' + workPage.url()
+    );
+  }}
   userTurn = workPage.locator(userMessageSelector).last();
   try {{
     await userTurn.waitFor({{ state: 'visible', timeout: 8000 }});
@@ -1444,7 +1612,8 @@ console.log({js(SUBMIT_MARKER)} + JSON.stringify({{
   submitElapsedMs,
   conversationUrl: stickyConversationUrl || (submittedTab ? submittedTab.url : workPage.url()),
   conversationId: conversationId,
-  targetId: submitState.ownedTargetId
+  targetId: submitState.ownedTargetId,
+  clickError: clickError
 }}));
 var responseStartedAt = Date.now();
 var responseDeadline = responseStartedAt + {response_timeout_ms};
@@ -1891,6 +2060,12 @@ def marker_payload(transcript: str, marker: str) -> dict[str, Any] | None:
     return None
 
 
+def nothing_typed_yet(stage: str) -> bool:
+    """A step before the composer is filled cannot have sent anything."""
+    rank = stage_rank(stage)
+    return 0 <= rank < stage_rank("fill-composer")
+
+
 def run_repl_outpost(
     script: str,
     *,
@@ -1898,72 +2073,118 @@ def run_repl_outpost(
     response_timeout: int,
     outpost_id: str = "",
     on_submit: Callable[[dict[str, Any]], None] | None = None,
+    project_url: str | None = None,
+    conversation_url: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], float, float, str]:
+    """Run the send script; decide from the backend, not the error, whether it went out.
+
+    A REPL that ends without the submit marker says nothing about the send by
+    itself: a click can throw after the turn left, and the daemon can drop
+    mid-click. Unless the script stopped before the composer held the prompt,
+    the backend is asked for the turn by its id. Found means sent; a complete
+    search that finds nothing means not sent; anything else is unknown.
+    """
     timeout = submit_timeout + response_timeout + 30
     transcript = ""
     earlier = ""
     submit_payload = None
+    since = time.time() - LOCATE_SINCE_SLACK_SECONDS
     for attempt in range(2):
         transcript = run_repl_process(script, timeout=timeout)
-        submit_unknown_payload = marker_payload(transcript, SUBMIT_UNKNOWN_MARKER)
-        if submit_unknown_payload is not None:
-            raise SubmitUnknownError(
-                "submission state unknown; do not retry\n"
-                + json.dumps(submit_unknown_payload, ensure_ascii=False)
-                + "\n"
-                + earlier
-                + transcript
-            )
         submit_payload = marker_payload(transcript, SUBMIT_MARKER)
         if submit_payload is not None:
             break
-        recovered = None
-        if outpost_id and (
-            transcript_lost_aside_daemon(transcript) or "/c/" in transcript
-        ):
-            recovered = recover_outpost_from_backend(outpost_id)
-        if recovered and recovered.get("conversationUrl"):
+        submit_unknown_payload = marker_payload(transcript, SUBMIT_UNKNOWN_MARKER)
+        daemon_lost = transcript_lost_aside_daemon(transcript)
+        stage, _detail = failure_reason_from(transcript)
+        late_commit = "120-second" in str((submit_unknown_payload or {}).get("reason") or "")
+        state, located = "unknown", None
+        if submit_unknown_payload is None and nothing_typed_yet(stage):
+            state = "absent"
+        elif outpost_id and not late_commit:
+            if daemon_lost:
+                ensure_aside_daemon()
+            state, located = locate_outpost_turn(
+                outpost_id,
+                project_url=project_url,
+                conversation_url=conversation_url,
+                since=since,
+            )
+        if state == "found":
+            assert located is not None
             submit_payload = {
                 "quality": "",
                 "model": "최신",
                 "tier": "",
-                "conversationUrl": recovered["conversationUrl"],
+                "conversationUrl": located["conversationUrl"],
+                "conversationId": located.get("conversationId") or "",
                 "targetId": "",
                 "submitElapsedMs": 0,
+                "foundByBackend": True,
             }
+            print(
+                f"OUTPOST_SENT_DESPITE_ERROR stage={stage or '-'} url={located['conversationUrl']} "
+                "— 보내기 단계가 오류로 끝났지만 백엔드에 이 ID의 턴이 있다. 보낸 것으로 보고 답을 회수한다.",
+                file=sys.stderr,
+                flush=True,
+            )
             if on_submit is not None:
                 on_submit(submit_payload)
-            if recovered.get("responseText") and recovered.get("finished", True):
+            if located.get("responseText") and located.get("finished", True):
                 return (
                     submit_payload,
                     {
-                        "responseText": recovered["responseText"],
-                        "idMatched": bool(recovered.get("idMatched")),
+                        "responseText": located["responseText"],
+                        "idMatched": bool(located.get("idMatched")),
                         "packetUnread": False,
                         "recoveredFromBackend": True,
                         "responseElapsedMs": 0,
-                        "conversationUrl": recovered["conversationUrl"],
+                        "conversationUrl": located["conversationUrl"],
+                        "conversationId": located.get("conversationId") or "",
+                        "modelSlug": located.get("modelSlug") or "",
                     },
                     0.0,
                     0.0,
                     earlier + transcript,
                 )
             raise SubmittedResponseError(submit_payload, 0.0, earlier + transcript)
-        if attempt == 0 and transcript_lost_aside_daemon(transcript):
+        if submit_unknown_payload is not None or state == "unknown":
+            reason = (
+                submit_unknown_payload
+                or {
+                    "reason": "the send step ended without proof either way and the backend "
+                    "could not be searched completely",
+                    "stage": stage or "",
+                }
+            )
+            raise SubmitUnknownError(
+                "submission state unknown; do not retry\n"
+                + json.dumps(reason, ensure_ascii=False)
+                + "\n"
+                + earlier
+                + transcript
+            )
+        verified = (
+            ""
+            if located is None
+            else "backend: no turn with this id in the project; the packet was not sent\n"
+        )
+        if attempt == 0 and daemon_lost:
             earlier = transcript + "\n"
             if ensure_aside_daemon() is None:
                 continue
-        if transcript_lost_aside_daemon(transcript):
+        if daemon_lost:
             raise RuntimeError(
                 describe_pre_submit_failure(
                     "aside daemon closed before submission; packet was not sent\n"
+                    + verified
                     + earlier
                     + transcript
                 )
             )
         raise RuntimeError(
             describe_pre_submit_failure(
-                "Aside REPL exited before submission marker\n" + transcript
+                "Aside REPL exited before submission marker\n" + verified + transcript
             )
         )
     assert submit_payload is not None
@@ -2103,6 +2324,7 @@ def live_check(*, project_url: str, project_name: str) -> dict[str, Any]:
             submit_timeout=SUBMIT_TIMEOUT_SECONDS,
             response_timeout=DOCTOR_RESPONSE_TIMEOUT_SECONDS,
             outpost_id=outpost_id,
+            project_url=project_url,
         )
     except SubmitUnknownError as exc:
         return {"ok": False, "sent": True, "stage": "commit-user-turn", "detail": str(exc)[:200]}
@@ -2111,6 +2333,7 @@ def live_check(*, project_url: str, project_name: str) -> dict[str, Any]:
             outpost_id,
             conversation_url=str(exc.submit_payload.get("conversationUrl") or "") or None,
             timeout=DOCTOR_RESPONSE_TIMEOUT_SECONDS,
+            project_url=project_url,
         )
         if not finished_backend_reply(recovered):
             return {"ok": False, "sent": True, "stage": "await-response", "detail": "answer not recovered"}
@@ -2480,6 +2703,17 @@ def open_or_continue_thread(
     return store, thread, store.thread_lock(thread["threadId"]), False, None, False
 
 
+def configured_project_url(args: argparse.Namespace) -> str | None:
+    config_path = resolve_config_path(args.config)
+    return (
+        args.url
+        or os.environ.get("OUTPOST_CHATGPT_URL")
+        or os.environ.get("CONSULT_CHATGPT_URL")
+        or read_config_value(config_path, "OUTPOST_CHATGPT_URL")
+        or read_config_value(config_path, "CONSULT_CHATGPT_URL")
+    )
+
+
 def recover_from_saved_state(args: argparse.Namespace) -> int:
     evidence_path = Path(args.recover_from).expanduser()
     try:
@@ -2500,16 +2734,48 @@ def recover_from_saved_state(args: argparse.Namespace) -> int:
         evidence.get("conversationUrl"),
         evidence.get("conversationId"),
     ) or None
-    recovered = recover_outpost_from_backend(
-        outpost_id,
-        conversation_url=conversation_url,
-        timeout=args.response_timeout,
-    )
+    # A run that ended before its conversation was known (exit 76, or an older
+    # run that wrongly said not sent) is found by its id in its project.
+    project_url = str(evidence.get("projectUrl") or "") or configured_project_url(args) or None
+    started_at = float(evidence.get("startedAt") or 0)
+    since = started_at - LOCATE_SINCE_SLACK_SECONDS if started_at else 0
     response_path = Path(args.response_output).expanduser()
     json_path = Path(args.json_output).expanduser()
     stderr_path = Path(args.stderr_output).expanduser()
     for path in (response_path, json_path, stderr_path):
         path.parent.mkdir(parents=True, exist_ok=True)
+    if not conversation_url:
+        state, located = locate_outpost_turn(outpost_id, project_url=project_url, since=since)
+        if state == "found":
+            assert located is not None
+            conversation_url = str(located["conversationUrl"])
+            print(f"OUTPOST_FOUND url={conversation_url} — 이 ID의 턴을 프로젝트에서 찾았다.", flush=True)
+        else:
+            status = "not_sent" if state == "absent" else "submit_unknown"
+            json_path.write_text(
+                json.dumps({**evidence, "ok": False, "status": status}, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            if state == "absent":
+                message = (
+                    "exit 75 — 프로젝트 어디에도 이 ID의 턴이 없다. 보내지 않은 것이니 "
+                    "같은 패킷을 다시 보내도 된다."
+                )
+            else:
+                message = (
+                    "exit 76 — 이 ID의 턴을 찾지도, 없다고 확인하지도 못했다. 다시 보내지 말고 "
+                    "잠시 뒤 recover를 다시 돌려라 (프로젝트가 다르면 --url)."
+                )
+            stderr_path.write_text(message + "\n", encoding="utf-8")
+            print(message, file=sys.stderr)
+            return NOT_SENT_EXIT if state == "absent" else SUBMIT_UNKNOWN_EXIT
+    recovered = recover_outpost_from_backend(
+        outpost_id,
+        conversation_url=conversation_url,
+        timeout=args.response_timeout,
+        project_url=project_url,
+        since=since,
+    )
     if finished_backend_reply(recovered):
         assert recovered is not None
         saved_paths = save_outpost_attachments(
@@ -2545,6 +2811,10 @@ def recover_from_saved_state(args: argparse.Namespace) -> int:
             saved["attachmentsDir"] = str(Path(f"/tmp/outpost-{outpost_id}"))
         saved = attach_thread_fields(saved, {"threadId": evidence.get("threadId") or ""}, str(evidence.get("mode") or "recover"))
         saved["packetSha"] = str(evidence.get("packetSha") or "")
+        if project_url:
+            saved["projectUrl"] = project_url
+        if evidence.get("startedAt"):
+            saved["startedAt"] = evidence["startedAt"]
         json_path.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         record_thread_outcome(
             session_store_from_args(args),
@@ -2688,6 +2958,7 @@ def main(argv: Sequence[str]) -> int:
             previous_status = str(previous.get("status") or ("finished" if previous.get("ok") else ""))
             if previous.get("ok") or previous_status in {
                 "submitted_pending",
+                "submit_unknown",
                 "submitted_response_unavailable",
                 "submitted_artifact_unavailable",
                 "finished",
@@ -2719,6 +2990,7 @@ def main(argv: Sequence[str]) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     mode = "continue" if follow_up else "new"
+    started_at = time.time()
     print(
         f"OUTPOST_THREAD thread={thread.get('threadId') if thread else '-'} "
         f"mode={mode} url={conversation_url or '-'}",
@@ -2737,6 +3009,10 @@ def main(argv: Sequence[str]) -> int:
         "conversationUrl": conversation_url or "",
         "threadId": (thread or {}).get("threadId") or "",
         "mode": mode,
+        # recover finds a turn by its id in this project even when nothing
+        # else about the send was saved.
+        "projectUrl": project_url,
+        "startedAt": round(started_at, 3),
     }
 
     def write_pending(extra: dict[str, Any] | None = None) -> None:
@@ -2814,6 +3090,8 @@ def main(argv: Sequence[str]) -> int:
                     response_timeout=args.response_timeout,
                     outpost_id=outpost_id,
                     on_submit=mark_submitted,
+                    project_url=project_url,
+                    conversation_url=conversation_url,
                 )
 
             try:
@@ -2865,7 +3143,13 @@ def main(argv: Sequence[str]) -> int:
     except SubmitUnknownError as exc:
         stderr_path.write_text(str(exc), encoding="utf-8")
         print(str(exc), file=sys.stderr)
+        print(
+            f"exit 76 — 보냈는지 확인되지 않았다. 다시 보내지 말고 'outpost recover {json_path.parent}'로 "
+            "이 ID의 턴을 프로젝트에서 찾아 회수하라.",
+            file=sys.stderr,
+        )
         stage, detail = failure_reason_from(exc)
+        write_pending({"ok": False, "status": "submit_unknown", "failureStage": stage or "commit-user-turn"})
         record_thread_outcome(
             store,
             thread,
@@ -2875,7 +3159,7 @@ def main(argv: Sequence[str]) -> int:
             failure_stage=stage or "commit-user-turn",
             failure_detail=detail,
         )
-        return 76
+        return SUBMIT_UNKNOWN_EXIT
     except SubmittedResponseError as exc:
         submitted = exc.submit_payload
         recovered = recover_outpost_from_backend(
@@ -2887,6 +3171,8 @@ def main(argv: Sequence[str]) -> int:
             )
             or None,
             timeout=args.response_timeout,
+            project_url=project_url,
+            since=started_at - LOCATE_SINCE_SLACK_SECONDS,
         )
         if finished_backend_reply(recovered):
             saved_paths = save_outpost_attachments(
@@ -3021,8 +3307,9 @@ def main(argv: Sequence[str]) -> int:
         stderr_path.write_text(str(exc), encoding="utf-8")
         print(str(exc), file=sys.stderr)
         stage, detail = failure_reason_from(exc)
-        # Nothing went out, so the run directory must not look sent: a resend of
-        # the same packet is the fix, not a duplicate.
+        # Only a failure the runner proved unsent lands here: the step stopped
+        # before the prompt was typed, or the backend has no turn with this id.
+        # The run directory must not look sent: a resend is the fix, not a duplicate.
         write_pending({"ok": False, "status": "not_sent", "failureStage": stage or "pre-submit"})
         record_thread_outcome(
             store,
@@ -3033,7 +3320,7 @@ def main(argv: Sequence[str]) -> int:
             failure_stage=stage or "pre-submit",
             failure_detail=detail,
         )
-        return 75
+        return NOT_SENT_EXIT
     stderr_path.write_text(transcript, encoding="utf-8")
     saved_paths = save_outpost_attachments(
         outpost_id,

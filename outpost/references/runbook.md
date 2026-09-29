@@ -115,14 +115,19 @@ outpost send --quality pro .outpost/<run>/packet.md --to last
 ```
 
 The runner's in-browser guard must commit the user turn under 120 seconds and
-record `submitElapsedSeconds`; it exits `75` at that boundary. Never increase
-or blindly retry the budget. One REPL process keeps the Work page alive through
+record `submitElapsedSeconds`; a run that misses it before the click exits `75`.
+Never increase or blindly retry the budget. One REPL process keeps the Work page alive through
 submission, response completion, and optional download. Never split those
 stages across REPL processes: closing the first process can terminate the
 generation before the conversation is persisted. Aside may buffer both markers
 until the process exits; parse the final transcript to distinguish pre-submit,
 committed-without-response, and complete outcomes. Aside REPL does not create a
 normal Aside GUI conversation entry.
+Aside 1.0.928 (2026-09-29) cuts the `aside repl` connection at 120 seconds with
+`fetch failed: other side closed` and drops everything the script printed,
+while the script keeps running in the daemon. A send whose answer takes longer
+— every Pro turn — ends without markers, and the backend lookup in "Sent or
+not is judged by the backend" finds the turn and recovers the answer.
 
 Parallel runners open unique ID-derived `data:` marker tabs and resolve
 their `targetId` by exact title and URL before navigating to Work. A
@@ -142,13 +147,17 @@ input with a unique `outpost-<id>.md` name. Work already contains many
 `packet.md` uploads, so ChatGPT renames a colliding chip to
 `packet(<timestamp>).md` and an exact `packet.md` locator dies after the
 upload finishes. The runner waits for the file-tile `group` whose name
-contains the outpost ID, including after send becomes enabled.
+contains the outpost ID, or for `outpost-<id>` in the page text, including
+after send becomes enabled. A second upload with the same ID (a heal retry) of
+`outpost-<id>.md` shows as `outpost-<id>(1).md`, and matching the
+full name would upload the packet again and leave send disabled at the click.
 A chip can still show an active upload, so submission also waits until the send
 button has neither native `disabled`, `aria-disabled="true"`, nor
 `data-visually-disabled`; image/video-only inputs and fixed sleeps are not
 valid packet transports. The runner opens Aside, pings REPL until it answers,
 and if the daemon drops before the submit marker it relaunches Aside and
-retries the same send once. After a user turn commits, do not retry.
+retries the same send once — only after the backend shows no turn with this ID
+(see "Sent or not is judged by the backend"). After a user turn commits, do not retry.
 Aside confines `download.saveAs()` to its session directory. The browser returns
 `download.path()` instead, and the Python runner copies that verified local file
 to `--artifact-output`. Threads are stored in `~/.codex/outpost-sessions.json`
@@ -164,18 +173,54 @@ outpost send --quality pro .outpost/<run>/packet.md --artifact .outpost/<run>/ar
 Aside waits for the ChatGPT download event, saves the zip directly, and the
 runner requires a nonempty zip with a valid CRC.
 
-Exit `76` is `SUBMIT_UNKNOWN`: the click occurred but the user turn was not
-commit-verified before the deadline. Preserve its evidence and never retry,
-invoke the Aside agent, or enter the Playwright fallback.
+Exit `76` is `SUBMIT_UNKNOWN`: the runner could not prove whether the turn
+went out — the click occurred but the user turn was not commit-verified before
+the deadline, or the run ended without the submit marker and the backend could
+not be searched completely. `result.json` says `status: submit_unknown`, and a
+second send from that run directory exits `79`. Preserve its evidence and never
+retry, invoke the Aside agent, or enter the Playwright fallback;
+`outpost recover` settles it.
 
 Exit `77` is `SUBMITTED_RESPONSE_UNAVAILABLE`: the exact user turn committed,
 but response tracking ended. Use the saved `conversationUrl` to recover that
 conversation only. Do not send the packet again.
 
+## Sent or not is judged by the backend
+
+Aside's `locator.click()` resolves the element once and never waits. A send
+button that is disabled for a moment is "not found", and a click can also end
+in an error after the turn already went out. On 2026-09-29 two `커리어` sends
+exited `75` "nothing was sent" with `Selector "…보내기…" not found at Cn.click`,
+and both turns were in the project with finished answers. An error from the
+send step is therefore never read as "not sent" by itself:
+
+| What ended the run | Decision |
+| --- | --- |
+| A step before `fill-composer` failed (the prompt was never typed) | not sent → `75` |
+| The page showed the user turn with the ID | sent → answer as usual |
+| Anything else without the submit marker (click error, daemon drop, timeout at or after `fill-composer`) | ask the backend for the ID |
+| Backend: a user turn with the ID exists | sent → wait for the answer, `0`/`77`/`78` |
+| Backend: the project list and every recent conversation were read, and no turn has the ID | not sent → `75` (heal and resend allowed) |
+| Backend could not be read completely | unknown → `76` |
+
+Before the click the runner waits for the enabled send button. After a click
+error it gives the page 20 seconds to show the turn, then the runner asks the
+backend (`locate_outpost_turn`). The lookup reads the project's own list,
+`backend-api/gizmos/<g-p-id>/conversations`, because project conversations are
+missing from the account-wide `backend-api/conversations` list. It reads only
+conversations touched since two minutes before the send, polls for 20 seconds
+so a turn that was still committing is found, and calls the search complete
+only when the list reaches past that start or has no further page. A heal and
+resend runs only after that proof.
+
 ## Manual recovery and explicit resend
 
 For exit `77`, the runner first recovers through ChatGPT
-`backend-api/conversation` using the Aside session cookie. Do not open the
+`backend-api/conversation` using the Aside session cookie. For exit `76`, or a
+`result.json` without a `conversationUrl`, `outpost recover` first finds the
+conversation by the run's ID in its project (`projectUrl` in `result.json`, else
+`--url`, else the configured project): found → the answer is saved; proven
+absent → `status: not_sent`, exit `75`; still unknown → exit `76`. Do not open the
 Work project chat list or acknowledge `요청이 너무 많습니다`; that modal is
 conversation-history throttling and more project-page snapshots extend it.
 
@@ -230,7 +275,8 @@ text is not a reject if the user turn committed and the reply was saved.
 Reject an answer that does not address the attached packet.
 
 A send that fails before the click at a screen step heals the screen map the
-same way doctor does, then sends once more: nothing went out, so this cannot
+same way doctor does, then sends once more. It does so only when the run is
+proven unsent (see "Sent or not is judged by the backend"), so this cannot
 double-send. `OUTPOST_AUTO_HEAL=0` turns it off. If the heal does not get
 through, the send exits `75` and `result.json` says `status: not_sent`, so the
 same packet may be sent again once the path is fixed. Do not hand the packet to
@@ -287,12 +333,14 @@ change.
 ## Nothing is lost after the send
 
 `result.json` is written before the send click with `status:
-submitted_pending`, `id`, and `packetSha`. If the REPL dies, Aside restarts,
-or the parent is killed, `outpost recover .outpost/<run>` finds the turn by id
-through the backend and saves the answer. A second `send` with the same packet
+submitted_pending`, `id`, `packetSha`, `projectUrl`, and `startedAt`. If the
+REPL dies, Aside restarts, or the parent is killed, `outpost recover
+.outpost/<run>` finds the turn by id in that project through the backend and
+saves the answer. A second `send` with the same packet
 in the same run directory exits `79` instead of spending another Pro turn;
-`OUTPOST_FORCE=1` is the deliberate override. A send that failed before the
-click rewrites the file to `status: not_sent`, which the guard lets through.
+`OUTPOST_FORCE=1` is the deliberate override. `status: submit_unknown` is
+guarded the same way. Only a send proven unsent rewrites the file to `status:
+not_sent`, which the guard lets through.
 
 ## Input attachments
 

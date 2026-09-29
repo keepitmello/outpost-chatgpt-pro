@@ -75,10 +75,11 @@ Read `response.md` and `result.json`. Verify every material claim locally
 before acting. Discard an unrelated reply. `references/after-advice.md`
 governs that pass.
 
-- Exit `75` — nothing was sent. The send already tried to heal a changed
-  ChatGPT screen and failed; report the stage and stop. The same packet may be
-  sent again after `outpost doctor` is green.
-- Exit `76` — send is unproven. Do not retry.
+- Exit `75` — nothing was sent, proven (stopped before the prompt was typed, or
+  no turn with this run's ID in the project). Report the stage and stop; resend
+  the same packet once `outpost doctor` is green.
+- Exit `76` — not provable either way. Do not resend; `outpost recover` finds
+  the turn by ID and saves the answer (`0`), proves it unsent (`75`), or stays `76`.
 - Exit `77` — the turn committed but the reply was not saved. Run
   `outpost recover`. Never resend that packet. A later `--to` is a new turn,
   not a resend.
@@ -89,9 +90,10 @@ governs that pass.
   of sending again; `OUTPOST_FORCE=1` overrides only when you mean to spend
   another Pro turn.
 
-`result.json` is written before the send with `status: submitted_pending`, so a
-dead REPL, an Aside restart, or a killed parent never loses the turn:
-`outpost recover .outpost/<run>` picks the answer up without resending.
+`result.json` is written before the send with `status: submitted_pending` and
+the project URL, so a dead REPL, an Aside restart, or a killed parent never
+loses the turn: `outpost recover .outpost/<run>` (older runs: `--url <project>`)
+picks the answer up without resending.
 
 Engine, Chat surface, recovery, and project config live in
 `references/runbook.md`.
