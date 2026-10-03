@@ -35,6 +35,7 @@ class Isolated(unittest.TestCase):
             os.environ,
             {
                 "OUTPOST_SESSIONS_PATH": str(self.root / "sessions.json"),
+                "OUTPOST_ASIDE_ROOT": str(self.root / "aside"),
                 "OUTPOST_UI_MAP_PATH": str(self.map_path),
                 "OUTPOST_AUTO_HEAL": "1",
             },
@@ -54,7 +55,7 @@ class ScreenMapTest(Isolated):
             project_url=PROJECT,
             quality="pro",
             packet_name="p.md",
-            packet_base64="cA==",
+            packet_path="/tmp/packet.md",
             topic="t",
             outpost_id="abc",
             response_timeout_ms=1000,

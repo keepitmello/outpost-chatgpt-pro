@@ -28,6 +28,7 @@ class AsideReplConsultTest(unittest.TestCase):
             os.environ,
             {
                 "OUTPOST_SESSIONS_PATH": str(Path(self._sessions_dir.name) / "sessions.json"),
+                "OUTPOST_ASIDE_ROOT": str(Path(self._sessions_dir.name) / "aside"),
                 # A test never reads the machine's learned screen map or calls
                 # the heal model unless it asks to.
                 "OUTPOST_UI_MAP_PATH": str(Path(self._sessions_dir.name) / "outpost-ui.json"),
@@ -42,7 +43,7 @@ class AsideReplConsultTest(unittest.TestCase):
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="pro",
             packet_name="outpost-abc.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="리허설",
             outpost_id="abc",
             response_timeout_ms=1000,
@@ -62,12 +63,81 @@ class AsideReplConsultTest(unittest.TestCase):
         # A top-level `return` makes the REPL drop the whole script silently.
         self.assertNotIn("\n  return;\n", script)
 
+    def test_send_and_recovery_pin_the_workspace_that_holds_the_project(self) -> None:
+        # After a browser restart ChatGPT can fall back to a workspace without the
+        # project; sending or recovering there reads every project turn as 404.
+        send = MODULE.build_repl_script(
+            project_url="https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project",
+            quality="xhigh",
+            packet_name="outpost-abc.md",
+            packet_path="/tmp/packet.md",
+            topic="계정",
+            outpost_id="abc",
+            response_timeout_ms=1000,
+        )
+        self.assertIn("var projectGizmoId = \"g-p-0123456789abcdef0123456789abcdef\";", send)
+        pin = send.index("ensureProjectAccount(workPage, projectGizmoId)")
+        self.assertLess(pin, send.index("submitStage = 'wait-project-composer'"))
+        self.assertLess(pin, send.index("submitState.send.click"))
+        recovery = MODULE.build_backend_recovery_script(
+            "abc", None, project_url="https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project"
+        )
+        self.assertLess(
+            recovery.index("await ensureProjectAccount(home, projectGizmoId)"),
+            recovery.index("var sess = await"),
+        )
+        # A wrong workspace is not a screen change for the heal model, and a stop
+        # there is before the prompt is typed, so nothing was sent.
+        self.assertNotIn("select-account", MODULE.HEALABLE_STAGES)
+        self.assertLess(
+            MODULE.STAGE_ORDER.index("select-account"), MODULE.STAGE_ORDER.index("fill-composer")
+        )
+
+    def test_waiting_for_a_long_reply_never_holds_one_repl_past_asides_cut(self) -> None:
+        # Aside drops a script's output at 120 s and keeps it polling in the
+        # daemon; stacked pollers rate-limited the account (2026-10-01).
+        now = [0.0]
+        lookups = []
+
+        def lookup(*args, **kwargs):
+            lookups.append(kwargs["timeout"])
+            now[0] += min(kwargs["timeout"], MODULE.REPL_LOOKUP_SECONDS)
+            done = len(lookups) == 3
+            return {"ok": True, "responseText": "answer" if done else "", "finished": done}
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        with mock.patch.object(MODULE, "run_repl_process") as repl, mock.patch.object(
+            MODULE, "backend_lookup", side_effect=lookup
+        ):
+            payload = MODULE.recover_outpost_from_backend(
+                "abc", "https://chatgpt.com/c/1", timeout=3600, clock=lambda: now[0], sleep=sleep
+            )
+        self.assertEqual(payload["responseText"], "answer")
+        self.assertEqual(len(lookups), 3)
+        repl.assert_not_called()
+        with mock.patch.object(MODULE, "run_repl_process", return_value="") as repl:
+            MODULE.backend_lookup("abc", "https://chatgpt.com/c/1", timeout=3600)
+        self.assertLess(repl.call_args.kwargs["timeout"], 120)
+        self.assertIn("Date.now() + 90000", repl.call_args.args[0])
+
+    def test_a_later_result_write_keeps_the_project_the_turn_went_to(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "result.json"
+            MODULE.write_result(path, {"status": "submitted_pending", "projectUrl": "https://chatgpt.com/g/g-p-ab/project", "startedAt": 5})
+            MODULE.write_result(path, {"status": "submitted_response_unavailable", "conversationUrl": "https://chatgpt.com/c/1"})
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "submitted_response_unavailable")
+        self.assertEqual(saved["projectUrl"], "https://chatgpt.com/g/g-p-ab/project")
+        self.assertEqual(saved["startedAt"], 5)
+
     def test_a_real_send_is_not_a_rehearsal(self) -> None:
         script = MODULE.build_repl_script(
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="pro",
             packet_name="outpost-abc.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="진짜 전송",
             outpost_id="abc",
             response_timeout_ms=1000,
@@ -134,7 +204,7 @@ class AsideReplConsultTest(unittest.TestCase):
             project_name="Shopping",
             quality="pro",
             packet_name="packet.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="프로젝트 전환",
             outpost_id="abc123",
             response_timeout_ms=1000,
@@ -154,7 +224,7 @@ class AsideReplConsultTest(unittest.TestCase):
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="pro",
             packet_name="packet.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="병렬 세션 탭 소유권",
             outpost_id="abc123",
             response_timeout_ms=1000,
@@ -163,7 +233,7 @@ class AsideReplConsultTest(unittest.TestCase):
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="pro",
             packet_name="packet.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="병렬 세션 탭 소유권",
             outpost_id="abc123",
             response_timeout_ms=1000,
@@ -180,7 +250,7 @@ class AsideReplConsultTest(unittest.TestCase):
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="xhigh",
             packet_name="packet.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="t",
             outpost_id="abc123",
             response_timeout_ms=1000,
@@ -236,9 +306,11 @@ class AsideReplConsultTest(unittest.TestCase):
         self.assertIn("clickError = String(error", pro)
         self.assertIn("OUTPOST_FAIL stage=commit-user-turn send click failed", pro)
         self.assertIn("ASIDE_REPL_RESPONSE_RESULT", pro)
-        self.assertIn("Buffer.from(packetBase64, 'base64')", pro)
+        # The bytes are read from staged files, never inlined into the script.
+        self.assertIn("await fs.readFile(packetFile)", pro)
+        self.assertNotIn("base64", pro.split("var extraUploads")[0].split("var packetFile")[1])
         self.assertIn("name: packetName", pro)
-        self.assertIn("setInputFiles([{", pro)
+        self.assertIn("setInputFiles(uploadFiles)", pro)
         self.assertNotIn("setInputFiles(packetPath)", pro)
         self.assertNotIn(".and(", pro)
         self.assertIn("Work의 새 채팅", pro)
@@ -842,7 +914,7 @@ printf '%s\\n' 'ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseTe
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="xhigh",
             packet_name="outpost-abc123.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="t",
             outpost_id="abc123",
             response_timeout_ms=1000,
@@ -915,6 +987,105 @@ print('ASIDE_REPL_SUBMIT_UNKNOWN {"quality":"pro","reason":"commit unverified"}'
                         submit_timeout=1,
                         response_timeout=1,
                     )
+
+    def test_an_attachment_past_the_argument_limit_is_staged_not_inlined(self) -> None:
+        # 2026-10-03: a 1.26 MB zip inlined as base64 overflowed the 1 MB
+        # command-line limit and `aside repl` never started.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record = root / "record.json"
+            fake = root / "aside"
+            fake.write_text(
+                f"""#!/usr/bin/env python3
+import json, re, sys
+script = sys.argv[-1]
+packet = json.loads(re.search(r"var packetFile = (.*);", script).group(1))
+uploads = json.loads(re.search(r"var extraUploads = (.*);", script).group(1))
+json.dump({{
+    "scriptBytes": len(script.encode("utf-8")),
+    "packet": open(packet, encoding="utf-8").read(),
+    "uploads": [open(u["path"], "rb").read().hex() for u in uploads],
+    "names": [u["name"] for u in uploads],
+}}, open({str(record)!r}, "w"))
+print('ASIDE_REPL_SUBMIT_UNKNOWN {{"quality":"pro","reason":"commit unverified"}}')
+""",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            packet = root / "packet.md"
+            packet.write_text("# Test topic\n\nquestion", encoding="utf-8")
+            big = root / "evidence.bin"
+            payload = os.urandom(2 * 1024 * 1024)
+            big.write_bytes(payload)
+            path = f"{temp}{os.pathsep}{os.environ.get('PATH', '')}"
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                with mock.patch.object(MODULE, "ensure_aside_daemon", return_value=None):
+                    result = MODULE.main(
+                        [
+                            "--quality", "pro",
+                            "--packet", str(packet),
+                            "--attach-input", str(big),
+                            "--url", "https://chatgpt.com/g/g-p-test-work/project",
+                            "--response-output", str(root / "response.md"),
+                            "--json-output", str(root / "result.json"),
+                            "--stderr-output", str(root / "stderr.log"),
+                        ]
+                    )
+                staging = Path(os.environ[MODULE.ASIDE_ROOT_ENV]) / MODULE.STAGING_SUBDIR
+
+            self.assertEqual(result, 76)
+            seen = json.loads(record.read_text(encoding="utf-8"))
+            self.assertLess(seen["scriptBytes"], 256 * 1024)
+            self.assertEqual(seen["uploads"], [payload.hex()])
+            self.assertEqual(seen["names"], ["evidence.bin"])
+            self.assertIn("question", seen["packet"])
+            # The staged copy is removed once the run ends.
+            self.assertEqual(list(staging.iterdir()), [])
+
+    def test_a_send_that_cannot_stage_is_proved_unsent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = root / "aside"
+            fake.write_text("#!/usr/bin/env python3\nprint('Aside daemon is not reachable')\n", encoding="utf-8")
+            fake.chmod(0o755)
+            packet = root / "packet.md"
+            packet.write_text("# Test topic\n\nquestion", encoding="utf-8")
+            path = f"{temp}{os.pathsep}{os.environ.get('PATH', '')}"
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                os.environ.pop(MODULE.ASIDE_ROOT_ENV, None)
+                with mock.patch.object(MODULE, "ensure_aside_daemon", return_value=None):
+                    result = MODULE.main(
+                        [
+                            "--quality", "pro",
+                            "--packet", str(packet),
+                            "--url", "https://chatgpt.com/g/g-p-test-work/project",
+                            "--response-output", str(root / "response.md"),
+                            "--json-output", str(root / "result.json"),
+                            "--stderr-output", str(root / "stderr.log"),
+                        ]
+                    )
+
+            self.assertEqual(result, MODULE.NOT_SENT_EXIT)
+            final = json.loads((root / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(final["status"], "not_sent")
+            self.assertEqual(final["failureStage"], "load-staged-files")
+
+    def test_staging_sweeps_runs_left_by_a_killed_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stale = root / MODULE.STAGING_SUBDIR / "old-run"
+            stale.mkdir(parents=True)
+            old = MODULE.time.time() - MODULE.STAGING_MAX_AGE_SECONDS - 60
+            os.utime(stale, (old, old))
+
+            staging, packet_path, staged = MODULE.stage_payload(
+                root, "new-run", b"packet", [{"name": "a.zip", "mime": "application/zip", "data": b"zip"}]
+            )
+
+            self.assertFalse(stale.exists())
+            self.assertEqual(Path(packet_path).read_bytes(), b"packet")
+            self.assertEqual(Path(staged[0]["path"]).read_bytes(), b"zip")
+            self.assertEqual(staging.parent, root / MODULE.STAGING_SUBDIR)
 
     def test_main_returns_76_for_submit_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1021,6 +1192,8 @@ print("response phase failed")
                             "--response-output", str(root / "response.md"),
                             "--json-output", str(result_path),
                             "--stderr-output", str(root / "stderr.log"),
+                            # recovery waits for the reply between short lookups
+                            "--response-timeout", "1",
                         ]
                     )
 
@@ -1173,7 +1346,7 @@ print('ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseText":"ID: 
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="pro",
             packet_name="packet.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="후속",
             outpost_id="abc123",
             response_timeout_ms=1000,
@@ -1447,7 +1620,7 @@ print('ASIDE_REPL_RESPONSE_RESULT {"modelSlug":"gpt-6-pro","responseText":"answe
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="pro",
             packet_name="outpost-x.md",
-            packet_base64="Zg==",
+            packet_path="/tmp/packet.md",
             topic="t",
             outpost_id="x",
             response_timeout_ms=1000,

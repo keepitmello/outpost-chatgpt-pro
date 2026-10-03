@@ -36,6 +36,7 @@ class ModelAndLossGuardTest(unittest.TestCase):
             os.environ,
             {
                 "OUTPOST_SESSIONS_PATH": str(Path(self._sessions_dir.name) / "sessions.json"),
+                "OUTPOST_ASIDE_ROOT": str(Path(self._sessions_dir.name) / "aside"),
                 # A test never reads the machine's learned screen map or calls
                 # the heal model unless it asks to.
                 "OUTPOST_UI_MAP_PATH": str(Path(self._sessions_dir.name) / "outpost-ui.json"),
@@ -255,9 +256,7 @@ class ModelAndLossGuardTest(unittest.TestCase):
             self.assertTrue(any("01-방법론.md" in note for note in notes))
 
             repacked = root / "repacked.zip"
-            repacked.write_bytes(
-                __import__("base64").b64decode(uploads[1]["base64"])
-            )
+            repacked.write_bytes(uploads[1]["data"])
             with ZipFile(repacked) as archive:
                 names = archive.namelist()
             for name in names:
@@ -270,7 +269,7 @@ class ModelAndLossGuardTest(unittest.TestCase):
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="pro",
             packet_name="packet.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="t",
             outpost_id="abc123",
             response_timeout_ms=1000,
@@ -292,7 +291,7 @@ class ModelAndLossGuardTest(unittest.TestCase):
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="pro",
             packet_name="packet.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="t",
             outpost_id="abc123",
             response_timeout_ms=1000,
@@ -306,7 +305,7 @@ class ModelAndLossGuardTest(unittest.TestCase):
             project_url="https://chatgpt.com/g/g-p-test-work/project",
             quality="pro",
             packet_name="packet.md",
-            packet_base64="cGFja2V0",
+            packet_path="/tmp/packet.md",
             topic="t",
             outpost_id="abc123",
             response_timeout_ms=1000,

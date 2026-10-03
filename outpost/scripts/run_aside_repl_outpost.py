@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
 from urllib.error import URLError
@@ -31,6 +32,15 @@ DEFAULT_RESPONSE_TIMEOUT_SECONDS = 3600
 # "other side closed" — the failure the keepalive log shows over and over.
 ASIDE_HEALTH_URL = os.environ.get("ASIDE_HEALTH_URL", "http://127.0.0.1:21420/health")
 DAEMON_SETTLE_SECONDS = 20
+# `aside repl` takes the script as one command-line argument, and macOS caps
+# arguments at 1 MB (2026-10-03: a 1.26 MB zip inlined as base64 never started
+# the REPL). The packet and uploads are staged as files instead and the script
+# reads them with the REPL's `fs`, which only reaches the account directory
+# (`~/.aside/u/<n>`) and the per-run session directory.
+ASIDE_ROOT_ENV = "OUTPOST_ASIDE_ROOT"
+ASIDE_ROOT_MARKER = "OUTPOST_ASIDE_SESSION "
+STAGING_SUBDIR = Path("tmp") / "outpost-staging"
+STAGING_MAX_AGE_SECONDS = 24 * 3600
 # Doctor rehearses the whole send path with this throwaway packet. It never
 # reaches ChatGPT: the rehearsal stops before the click.
 REHEARSAL_TOPIC = "outpost 리허설"
@@ -64,9 +74,11 @@ REHEARSAL_STOP = "OUTPOST_REHEARSAL_STOP"
 FAIL_STAGE_RE = re.compile(r"OUTPOST_FAIL stage=(\S+)\s+(.*)")
 STAGE_IN_MESSAGE_RE = re.compile(r"단계:\s*(\S+)")
 STAGE_HINTS = {
+    "load-staged-files": "스테이징한 패킷·첨부 읽기",
     "open-isolated-tab": "격리 탭",
     "load-work-project": "프로젝트 페이지",
     "load-saved-conversation": "저장된 대화",
+    "select-account": "프로젝트가 있는 ChatGPT 워크스페이스",
     "wait-project-composer": "새 채팅 입력창",
     "wait-conversation-composer": "이어가기 입력창",
     "select-chat-surface": "Chat/Work 토글",
@@ -102,6 +114,9 @@ PROJECT_GIZMO_RE = re.compile(r"^/g/(g-p-[0-9a-fA-F]+)")
 # How long the backend is polled for a turn before "not there" counts as not
 # sent: a click that landed a moment before the REPL died is still committing.
 LOCATE_TIMEOUT_SECONDS = 20
+# Aside cuts `aside repl` at 120 seconds and drops the output; one backend
+# lookup ends well before that and the wait for a long reply loops in Python.
+REPL_LOOKUP_SECONDS = 90
 # A lookup only reads project conversations touched this long before the send
 # started, so it stays a handful of reads even in a busy project.
 LOCATE_SINCE_SLACK_SECONDS = 120
@@ -373,8 +388,8 @@ def normalized_zip_bytes(path: Path) -> tuple[bytes, list[tuple[str, str]]]:
     return buffer.getvalue(), renames
 
 
-def build_uploads(paths: Sequence[str]) -> tuple[list[dict[str, str]], list[str]]:
-    uploads: list[dict[str, str]] = []
+def build_uploads(paths: Sequence[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    uploads: list[dict[str, Any]] = []
     notes: list[str] = []
     for index, raw in enumerate(paths):
         source = Path(raw).expanduser()
@@ -393,10 +408,63 @@ def build_uploads(paths: Sequence[str]) -> tuple[list[dict[str, str]], list[str]
             {
                 "name": upload_name,
                 "mime": "application/zip" if source.suffix.lower() == ".zip" else "application/octet-stream",
-                "base64": base64.b64encode(payload).decode("ascii"),
+                "data": payload,
             }
         )
     return uploads, notes
+
+
+def aside_project_root() -> Path:
+    """The account directory the REPL's `fs` may read, asked of the REPL itself."""
+    override = os.environ.get(ASIDE_ROOT_ENV)
+    if override:
+        return Path(override).expanduser()
+    transcript = run_repl_process(
+        f"console.log({js(ASIDE_ROOT_MARKER)} + await fs.resolvePath('.'))",
+        timeout=20,
+    )
+    for line in transcript.splitlines():
+        clean = ANSI_RE.sub("", line).strip()
+        if clean.startswith(ASIDE_ROOT_MARKER):
+            session = Path(clean[len(ASIDE_ROOT_MARKER):].strip())
+            if session.parent.name == "sessions":
+                return session.parent.parent
+    raise RuntimeError(f"aside session directory not found: {transcript.strip()[:200]}")
+
+
+def stage_payload(
+    root: Path,
+    outpost_id: str,
+    packet: bytes,
+    uploads: Sequence[dict[str, Any]] = (),
+) -> tuple[Path, str, list[dict[str, str]]]:
+    """Write the packet and uploads where the REPL can read them; no size limit."""
+    base = root / STAGING_SUBDIR
+    if base.is_dir():
+        cutoff = time.time() - STAGING_MAX_AGE_SECONDS
+        for old in base.iterdir():
+            if old.is_dir() and old.stat().st_mtime < cutoff:
+                shutil.rmtree(old, ignore_errors=True)
+    staging = base / outpost_id
+    staging.mkdir(parents=True, exist_ok=True)
+    packet_path = staging / "packet.md"
+    packet_path.write_bytes(packet)
+    staged: list[dict[str, str]] = []
+    for index, item in enumerate(uploads):
+        path = staging / f"upload-{index}"
+        path.write_bytes(item["data"])
+        staged.append({"name": item["name"], "mime": item["mime"], "path": str(path)})
+    return staging, str(packet_path), staged
+
+
+@contextmanager
+def staged_payload(outpost_id: str, packet: bytes, uploads: Sequence[dict[str, Any]] = ()):
+    """Stage for one run and remove the files when it ends."""
+    staging, packet_path, staged = stage_payload(aside_project_root(), outpost_id, packet, uploads)
+    try:
+        yield packet_path, staged
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def save_outpost_attachments(
@@ -642,6 +710,8 @@ var pollIntervalMs = {int(poll_interval_ms)};
 var recoveredModelSlug = '';
 var home = await openTab('https://chatgpt.com/');
 await home.waitForLoadState('domcontentloaded');
+{ACCOUNT_HELPERS}
+await ensureProjectAccount(home, projectGizmoId);
 var sess = await (await fetch('https://chatgpt.com/api/auth/session')).json();
 if (!sess || !sess.accessToken) throw new Error('chatgpt session token missing');
 var auth = {{ headers: {{ Authorization: 'Bearer ' + sess.accessToken }} }};
@@ -900,6 +970,21 @@ def project_gizmo_id(project_url: str | None) -> str:
     return match.group(1) if match else ""
 
 
+def write_result(path: Path, data: dict[str, Any]) -> None:
+    """Write result.json, keeping where the turn was sent from the pending write.
+
+    `recover` finds a turn in its project; a later write that drops `projectUrl`
+    sends it to the configured default project instead (2026-10-01: a 커리어 Pro
+    turn was looked up in Work and never recovered).
+    """
+    try:
+        prior = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        prior = {}
+    kept = {key: prior[key] for key in ("projectUrl", "startedAt") if prior.get(key) and not data.get(key)}
+    path.write_text(json.dumps({**data, **kept}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def backend_lookup(
     outpost_id: str,
     conversation_url: str | None = None,
@@ -910,20 +995,26 @@ def backend_lookup(
     since: float = 0,
     until_found: bool = False,
 ) -> dict[str, Any] | None:
-    """What the backend knows about the turn carrying this id; None when it could not be asked."""
+    """What the backend knows about the turn carrying this id; None when it could not be asked.
+
+    One lookup stays under Aside's 120-second `aside repl` cut. A longer script
+    loses its output and keeps polling inside the daemon after the caller gave
+    up; repeated recovers then stack those pollers until ChatGPT answers 429.
+    """
     if not outpost_id:
         return None
+    timeout = max(1, min(int(timeout), REPL_LOOKUP_SECONDS))
     transcript = run_repl_process(
         build_backend_recovery_script(
             outpost_id,
             conversation_url,
-            timeout_ms=max(1, int(timeout)) * 1000,
+            timeout_ms=timeout * 1000,
             poll_interval_ms=max(1, int(poll_interval)) * 1000,
             project_url=project_url,
             since=since,
             until_found=until_found,
         ),
-        timeout=max(1, int(timeout)) + 15,
+        timeout=timeout + 15,
     )
     return marker_payload(transcript, BACKEND_RECOVERY_MARKER)
 
@@ -936,18 +1027,25 @@ def recover_outpost_from_backend(
     poll_interval: int = 5,
     project_url: str | None = None,
     since: float = 0,
+    wait_between: float = 60,
+    clock=time.monotonic,
+    sleep=time.sleep,
 ) -> dict[str, Any] | None:
-    payload = backend_lookup(
-        outpost_id,
-        conversation_url,
-        timeout=timeout,
-        poll_interval=poll_interval,
-        project_url=project_url,
-        since=since,
-    )
-    if not payload or not payload.get("ok"):
-        return None
-    return payload
+    """Wait up to `timeout` for the reply as short lookups with a pause between them."""
+    deadline = clock() + max(1, int(timeout))
+    while True:
+        payload = backend_lookup(
+            outpost_id,
+            conversation_url,
+            timeout=max(1, int(deadline - clock())),
+            poll_interval=poll_interval,
+            project_url=project_url,
+            since=since,
+        )
+        found = payload if payload and payload.get("ok") else None
+        if finished_backend_reply(found) or deadline - clock() <= wait_between:
+            return found
+        sleep(wait_between)
 
 
 def locate_outpost_turn(
@@ -1019,6 +1117,60 @@ def wrong_model_message(observed: str, response_path: Path, required: str) -> st
 # no aria-label, so the send died at select-tier while doctor's click fallback
 # covered for it. snapshot() prints the computed name, so resolve names there
 # and act on the ref locator. String names compare exactly; RegExp names test.
+# ChatGPT picks the workspace from the `_account` cookie. After the browser
+# restarts it can fall back to the first workspace in the login's ordering, where
+# the project does not exist (2026-10-01: a team workspace; every project and
+# conversation read 404 and a Pro answer could not be recovered). Every script
+# that reads or sends pins the workspace that can see the project first.
+ACCOUNT_HELPERS = r"""
+async function ensureProjectAccount(target, gizmoId) {
+  if (!gizmoId) return '';
+  var listUrl = 'https://chatgpt.com/backend-api/gizmos/' + gizmoId + '/conversations?cursor=0';
+  async function token() {
+    var s = await (await fetch('https://chatgpt.com/api/auth/session')).json().catch(() => null);
+    return s && s.accessToken ? s : null;
+  }
+  async function visible(s) {
+    var r = await fetch(listUrl, { headers: { Authorization: 'Bearer ' + s.accessToken } }).catch(() => null);
+    return r ? r.status : 0;
+  }
+  async function pin(id) {
+    await target.evaluate((value) => {
+      var tail = '; path=/; max-age=31536000; secure; samesite=lax';
+      document.cookie = '_account=' + value + tail;
+      document.cookie = '_account=' + value + '; domain=.chatgpt.com' + tail;
+    }, id);
+    // The session endpoint answers for the workspace the page was loaded with.
+    await target.reload();
+    await target.waitForLoadState('domcontentloaded');
+  }
+  var s = await token();
+  if (!s) return '';
+  var status = await visible(s);
+  // Only "not found / no access" says the workspace is wrong; a rate limit or a
+  // network error says nothing about it.
+  if (status !== 403 && status !== 404) return '';
+  var current = (s.account && s.account.id) || '';
+  var check = await fetch('https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27', {
+    headers: { Authorization: 'Bearer ' + s.accessToken }
+  }).catch(() => null);
+  var accounts = check && check.ok ? (((await check.json().catch(() => null)) || {}).accounts || {}) : {};
+  // The access token is issued for one workspace, so another workspace is only
+  // tried by switching the cookie and asking for a fresh session.
+  for (var id of Object.keys(accounts)) {
+    if (id === 'default' || id === current) continue;
+    await pin(id);
+    var next = await token();
+    if (next && next.account && next.account.id === id && (await visible(next)) === 200) {
+      console.log('OUTPOST_ACCOUNT switched from=' + current + ' to=' + id);
+      return id;
+    }
+  }
+  if (current) await pin(current);
+  throw new Error('project ' + gizmoId + ' is not visible in any ChatGPT workspace of this login');
+}
+"""
+
 NAME_LOOKUP_HELPERS = r"""
 function findRefByName(tree, role, name) {
   var pattern = new RegExp('- ' + role + ' "([^"]*)" \\[ref=(e\\d+)\\]', 'g');
@@ -1050,7 +1202,7 @@ def build_repl_script(
     project_name: str = DEFAULT_PROJECT_NAME,
     quality: str,
     packet_name: str,
-    packet_base64: str,
+    packet_path: str,
     topic: str,
     outpost_id: str,
     response_timeout_ms: int,
@@ -1061,6 +1213,7 @@ def build_repl_script(
     uploads: Sequence[dict[str, str]] | None = None,
     dry_run: bool = False,
 ) -> str:
+    """`packet_path` and each upload's `path` are files staged by `stage_payload`."""
     ui = ui or UI.load_ui_map()
     target_labels = list(ui["tierLabels"].get(quality) or [])
     if not target_labels:
@@ -1076,6 +1229,7 @@ def build_repl_script(
     return f"""
 var projectUrl = {js(project_url)};
 var startUrl = {js(start_url)};
+var projectGizmoId = {js(project_gizmo_id(project_url))};
 var continueMode = {js(continue_mode)};
 var expectedConversationId = {js(expected_conversation_id)};
 var outpostId = {js(outpost_id)};
@@ -1095,7 +1249,7 @@ var tierPositionRe = new RegExp({js(ui["tierPositionPattern"])});
 var quality = {js(quality)};
 var packetName = {js(packet_name)};
 var packetStem = {js(packet_name.rsplit(".", 1)[0])};
-var packetBase64 = {js(packet_base64)};
+var packetFile = {js(packet_path)};
 var extraUploads = {js(list(uploads or []))};
 var artifactRequested = {js(artifact_output is not None)};
 var composerPrompt = {js(build_composer_prompt(topic, outpost_id, artifact_output, follow_up=follow_up))};
@@ -1109,7 +1263,7 @@ var verifiedTier = null;
 var dryRun = {js(dry_run)};
 var modelRadiosSeen = [];
 var submitStartedAt = Date.now();
-var submitStage = 'open-isolated-tab';
+var submitStage = 'load-staged-files';
 var diagPage = null;
 var diagEmitted = false;
 var presubmitDone = false;
@@ -1132,6 +1286,7 @@ async function waitRole(target, role, name, timeoutMs) {{
   }}
 }}
 {NAME_LOOKUP_HELPERS}
+{ACCOUNT_HELPERS}
 async function bodyTextOf(target) {{
   return await target.evaluate(function () {{
     return (document.body && document.body.innerText || '').trim();
@@ -1233,6 +1388,13 @@ async function waitComposer(target, selector, attempts) {{
 var submitState = await Promise.race([
   (async () => {{
     try {{
+    // The bytes come from staged files, not the script: `aside repl` takes the
+    // script as one command-line argument and macOS caps that at 1 MB.
+    var uploadFiles = [{{ name: packetName, mimeType: 'text/markdown', buffer: await fs.readFile(packetFile) }}];
+    for (var stagedUpload of extraUploads) {{
+      uploadFiles.push({{ name: stagedUpload.name, mimeType: stagedUpload.mime, buffer: await fs.readFile(stagedUpload.path) }});
+    }}
+    submitStage = 'open-isolated-tab';
     var ownershipMarker = 'outpost-owner-' + {js(outpost_id)};
     var ownershipUrl = 'data:text/html,<title>' + ownershipMarker + '</title>';
     var workPage = await openTab(ownershipUrl);
@@ -1246,6 +1408,12 @@ var submitState = await Promise.race([
     submitStage = continueMode ? 'load-saved-conversation' : 'load-work-project';
     await workPage.goto(startUrl);
     await workPage.waitForLoadState('domcontentloaded');
+    submitStage = 'select-account';
+    if (await ensureProjectAccount(workPage, projectGizmoId)) {{
+      submitStage = continueMode ? 'load-saved-conversation' : 'load-work-project';
+      await workPage.goto(startUrl);
+      await workPage.waitForLoadState('domcontentloaded');
+    }}
     var composer;
     if (continueMode) {{
       submitStage = 'wait-conversation-composer';
@@ -1449,17 +1617,7 @@ var submitState = await Promise.race([
     }}
     var attached = false;
     for (var attachAttempt = 0; attachAttempt < 2 && !attached; attachAttempt += 1) {{
-      await fileInput.setInputFiles([{{
-        name: packetName,
-        mimeType: 'text/markdown',
-        buffer: Buffer.from(packetBase64, 'base64')
-      }}].concat(extraUploads.map(function (item) {{
-        return {{
-          name: item.name,
-          mimeType: item.mime,
-          buffer: Buffer.from(item.base64, 'base64')
-        }};
-      }})));
+      await fileInput.setInputFiles(uploadFiles);
       attached = await attachmentPresent(30000);
     }}
     if (!attached) throw new Error('packet attachment missing before send');
@@ -1467,17 +1625,7 @@ var submitState = await Promise.race([
     var send = workPage.locator(sendSelector).first();
     await send.waitFor({{ state: 'visible', timeout: 60000 }});
     if (!(await attachmentPresent(10000))) {{
-      await fileInput.setInputFiles([{{
-        name: packetName,
-        mimeType: 'text/markdown',
-        buffer: Buffer.from(packetBase64, 'base64')
-      }}].concat(extraUploads.map(function (item) {{
-        return {{
-          name: item.name,
-          mimeType: item.mime,
-          buffer: Buffer.from(item.base64, 'base64')
-        }};
-      }})));
+      await fileInput.setInputFiles(uploadFiles);
       if (!(await attachmentPresent(30000))) {{
         throw new Error('packet attachment missing before send');
       }}
@@ -2265,20 +2413,24 @@ def rehearse(
 ) -> dict[str, Any]:
     """Walk the send path for this quality up to the click; never send."""
     rehearsal_id = secrets.token_hex(8)
-    script = build_repl_script(
-        project_url=project_url,
-        project_name=project_name,
-        quality=quality,
-        packet_name=f"outpost-{rehearsal_id}.md",
-        packet_base64=base64.b64encode(REHEARSAL_PACKET.encode("utf-8")).decode("ascii"),
-        topic=REHEARSAL_TOPIC,
-        outpost_id=rehearsal_id,
-        response_timeout_ms=1000,
-        conversation_url=conversation_url,
-        follow_up=bool(conversation_url),
-        dry_run=True,
-    )
-    transcript = run_repl_process(script, timeout=SUBMIT_TIMEOUT_SECONDS)
+    try:
+        with staged_payload(rehearsal_id, REHEARSAL_PACKET.encode("utf-8")) as (packet_path, _):
+            script = build_repl_script(
+                project_url=project_url,
+                project_name=project_name,
+                quality=quality,
+                packet_name=f"outpost-{rehearsal_id}.md",
+                packet_path=packet_path,
+                topic=REHEARSAL_TOPIC,
+                outpost_id=rehearsal_id,
+                response_timeout_ms=1000,
+                conversation_url=conversation_url,
+                follow_up=bool(conversation_url),
+                dry_run=True,
+            )
+            transcript = run_repl_process(script, timeout=SUBMIT_TIMEOUT_SECONDS)
+    except (RuntimeError, OSError) as exc:
+        return {"ok": False, "stage": "load-staged-files", "detail": str(exc)[:200]}
     payload = marker_payload(transcript, REHEARSAL_MARKER)
     if payload is not None:
         return {**payload, "ok": True, "stage": "ready-to-send"}
@@ -2308,24 +2460,25 @@ console.log('OUTPOST_HIDE_RESULT ' + JSON.stringify({{ status: status }}));
 def live_check(*, project_url: str, project_name: str) -> dict[str, Any]:
     """Send a throwaway packet on xhigh and read the answer back."""
     outpost_id = secrets.token_hex(16)
-    script = build_repl_script(
-        project_url=project_url,
-        project_name=project_name,
-        quality="xhigh",
-        packet_name=f"outpost-{outpost_id}.md",
-        packet_base64=base64.b64encode(DOCTOR_PACKET.encode("utf-8")).decode("ascii"),
-        topic=DOCTOR_TOPIC,
-        outpost_id=outpost_id,
-        response_timeout_ms=DOCTOR_RESPONSE_TIMEOUT_SECONDS * 1000,
-    )
     try:
-        submit, response, _, response_elapsed, _ = run_repl_outpost(
-            script,
-            submit_timeout=SUBMIT_TIMEOUT_SECONDS,
-            response_timeout=DOCTOR_RESPONSE_TIMEOUT_SECONDS,
-            outpost_id=outpost_id,
-            project_url=project_url,
-        )
+        with staged_payload(outpost_id, DOCTOR_PACKET.encode("utf-8")) as (packet_path, _):
+            script = build_repl_script(
+                project_url=project_url,
+                project_name=project_name,
+                quality="xhigh",
+                packet_name=f"outpost-{outpost_id}.md",
+                packet_path=packet_path,
+                topic=DOCTOR_TOPIC,
+                outpost_id=outpost_id,
+                response_timeout_ms=DOCTOR_RESPONSE_TIMEOUT_SECONDS * 1000,
+            )
+            submit, response, _, response_elapsed, _ = run_repl_outpost(
+                script,
+                submit_timeout=SUBMIT_TIMEOUT_SECONDS,
+                response_timeout=DOCTOR_RESPONSE_TIMEOUT_SECONDS,
+                outpost_id=outpost_id,
+                project_url=project_url,
+            )
     except SubmitUnknownError as exc:
         return {"ok": False, "sent": True, "stage": "commit-user-turn", "detail": str(exc)[:200]}
     except SubmittedResponseError as exc:
@@ -2752,10 +2905,7 @@ def recover_from_saved_state(args: argparse.Namespace) -> int:
             print(f"OUTPOST_FOUND url={conversation_url} — 이 ID의 턴을 프로젝트에서 찾았다.", flush=True)
         else:
             status = "not_sent" if state == "absent" else "submit_unknown"
-            json_path.write_text(
-                json.dumps({**evidence, "ok": False, "status": status}, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            write_result(json_path, {**evidence, "ok": False, "status": status})
             if state == "absent":
                 message = (
                     "exit 75 — 프로젝트 어디에도 이 ID의 턴이 없다. 보내지 않은 것이니 "
@@ -2815,7 +2965,7 @@ def recover_from_saved_state(args: argparse.Namespace) -> int:
             saved["projectUrl"] = project_url
         if evidence.get("startedAt"):
             saved["startedAt"] = evidence["startedAt"]
-        json_path.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_result(json_path, saved)
         record_thread_outcome(
             session_store_from_args(args),
             {"threadId": evidence.get("threadId") or ""} if evidence.get("threadId") else None,
@@ -2853,7 +3003,7 @@ def recover_from_saved_state(args: argparse.Namespace) -> int:
         {"threadId": evidence.get("threadId") or ""} if evidence.get("threadId") else None,
         str(evidence.get("mode") or "recover"),
     )
-    json_path.write_text(json.dumps(failed, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_result(json_path, failed)
     print(
         "submission committed but response recovery failed; recover the same conversation and do not resend",
         file=sys.stderr,
@@ -2926,7 +3076,6 @@ def main(argv: Sequence[str]) -> int:
             + "\n".join(f"- `{note}`" for note in upload_notes)
             + "\n"
         )
-    packet_base64 = base64.b64encode(raw_body.encode("utf-8")).decode("ascii")
     outpost_id = secrets.token_hex(16)
     stderr_path = Path(args.stderr_output).expanduser()
     response_path = Path(args.response_output).expanduser()
@@ -3019,10 +3168,7 @@ def main(argv: Sequence[str]) -> int:
         if extra:
             pending_evidence.update(extra)
         try:
-            json_path.write_text(
-                json.dumps(pending_evidence, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            write_result(json_path, pending_evidence)
         except OSError:
             pass
 
@@ -3056,6 +3202,7 @@ def main(argv: Sequence[str]) -> int:
             outpost_id=outpost_id,
         )
 
+    staging: Path | None = None
     try:
         with thread_lock:
             if needs_start and thread is not None and store is not None:
@@ -3068,6 +3215,12 @@ def main(argv: Sequence[str]) -> int:
                     packet_path=packet_source,
                     pid=os.getpid(),
                 )
+            try:
+                staging, staged_packet, staged_uploads = stage_payload(
+                    aside_project_root(), outpost_id, raw_body.encode("utf-8"), uploads
+                )
+            except (RuntimeError, OSError) as exc:
+                raise RuntimeError(f"OUTPOST_FAIL stage=load-staged-files {exc}") from exc
             def send_once():
                 # The script is rebuilt on every attempt so a healed screen map
                 # is what the retry looks up.
@@ -3077,14 +3230,14 @@ def main(argv: Sequence[str]) -> int:
                         project_name=project_name,
                         quality=args.quality,
                         packet_name=f"outpost-{outpost_id}.md",
-                        packet_base64=packet_base64,
+                        packet_path=staged_packet,
                         topic=topic,
                         outpost_id=outpost_id,
                         response_timeout_ms=args.response_timeout * 1000,
                         artifact_output=str(artifact_path) if artifact_path else None,
                         conversation_url=conversation_url,
                         follow_up=follow_up,
-                        uploads=uploads,
+                        uploads=staged_uploads,
                     ),
                     submit_timeout=SUBMIT_TIMEOUT_SECONDS,
                     response_timeout=args.response_timeout,
@@ -3218,10 +3371,7 @@ def main(argv: Sequence[str]) -> int:
                 recovered_evidence["attachments"] = [str(p) for p in saved_paths]
                 recovered_evidence["attachmentsDir"] = str(Path(f"/tmp/outpost-{outpost_id}"))
             recovered_evidence["packetSha"] = packet_sha
-            json_path.write_text(
-                json.dumps(recovered_evidence, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            write_result(json_path, recovered_evidence)
             record_thread_outcome(
                 store,
                 thread,
@@ -3281,10 +3431,7 @@ def main(argv: Sequence[str]) -> int:
             mode,
         )
         evidence["packetSha"] = packet_sha
-        json_path.write_text(
-            json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_result(json_path, evidence)
         record_thread_outcome(
             store,
             thread,
@@ -3321,6 +3468,9 @@ def main(argv: Sequence[str]) -> int:
             failure_detail=detail,
         )
         return NOT_SENT_EXIT
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
     stderr_path.write_text(transcript, encoding="utf-8")
     saved_paths = save_outpost_attachments(
         outpost_id,
@@ -3380,10 +3530,7 @@ def main(argv: Sequence[str]) -> int:
             mode,
         )
         evidence["packetSha"] = packet_sha
-        json_path.write_text(
-            json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_result(json_path, evidence)
         record_thread_outcome(
             store,
             thread,
@@ -3451,7 +3598,7 @@ def main(argv: Sequence[str]) -> int:
         evidence["attachments"] = [str(p) for p in saved_paths]
         evidence["attachmentsDir"] = str(Path(f"/tmp/outpost-{outpost_id}"))
     evidence["packetSha"] = packet_sha
-    json_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_result(json_path, evidence)
     record_thread_outcome(
         store,
         thread,

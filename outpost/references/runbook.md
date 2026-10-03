@@ -136,9 +136,16 @@ can both claim the same target. Different `threadId`s may run at the same
 time. A second send to the same thread fails closed while that thread is
 busy; wait for it to finish or recover, then `--thread` again.
 
-Python reads `--packet` itself and embeds the bytes in the REPL script
-argument. The browser receives an in-memory file payload, never the local
-packet path. The composer
+Python reads `--packet` and every `--attach` itself and stages the bytes under
+the Aside account directory (`~/.aside/u/<n>/tmp/outpost-staging/<id>/`); the
+REPL script carries only those paths. `aside repl` takes the script as one
+command-line argument, which macOS caps at 1 MB, so bytes inlined there fail
+before the REPL starts. The REPL's `fs` reads only the account and session
+directories, so the staging root is asked of the REPL (`fs.resolvePath`), and
+the script reads the files first (`load-staged-files`, before anything is
+typed). The browser receives an in-memory file payload, never a local path.
+The staging directory is removed when the run ends; one left by a killed run
+is swept after a day. The composer
 starts with the packet H1 topic, then `ID: <hex>`, followed by a short
 ID-bound instruction. Packet location, blank lines,
 and trailing newlines therefore do not participate in browser input validation.
