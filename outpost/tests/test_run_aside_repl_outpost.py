@@ -243,7 +243,10 @@ class AsideReplConsultTest(unittest.TestCase):
         self.assertEqual(MODULE.SUBMIT_TIMEOUT_SECONDS, 120)
         self.assertIn("개 중", pro)
         self.assertIn("verifiedTier", pro)
-        self.assertIn("^최신$", pro)
+        self.assertIn(
+            f'var targetModel = {json.dumps(MODULE.UI.DEFAULT_UI_MAP["modelRadio"])};',
+            pro,
+        )
         self.assertIn("targetModel", pro)
         self.assertIn('var targetLabels = ["Pro"]', pro)
         xhigh = MODULE.build_repl_script(
@@ -510,7 +513,7 @@ print('ASIDE_REPL_RESPONSE_RESULT {"modelSlug":"gpt-6-pro","responseText":"ID: a
             fake = root / "aside"
             fake.write_text(
                 """#!/usr/bin/env python3
-print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"최신","tier":"매우 높음 (4 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1","targetId":"target"}')
+print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"GPT-6","tier":"매우 높음 (4 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1","targetId":"target"}')
 print('ASIDE_REPL_RESPONSE_RESULT {"modelSlug":"gpt-6-pro","responseText":"no id here","idMatched":false,"packetUnread":false,"responseElapsedMs":5678,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1"}')
 """,
                 encoding="utf-8",
@@ -753,7 +756,7 @@ printf '%s\\n' 'ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseTe
                     "responseText": "ID answer", "finished": True, "idMatched": True,
                     "conversationUrl": "https://chatgpt.com/c/6abb5830-166c-83ee-86ca-c9d7f028e4b5",
                     "conversationId": "6abb5830-166c-83ee-86ca-c9d7f028e4b5",
-                    "modelSlug": "gpt-5-6-thinking",
+                    "modelSlug": MODULE.required_model_slug("xhigh"),
                 })},
             )
             self.assertEqual(code, 0)
@@ -775,7 +778,7 @@ printf '%s\\n' 'ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseTe
                 recover_outpost_from_backend={"return_value": {
                     "ok": True, "responseText": "later answer", "finished": True, "idMatched": True,
                     "conversationUrl": "https://chatgpt.com/c/6abb59f2-359c-83e8-93aa-c7c3f8af054f",
-                    "modelSlug": "gpt-5-6-thinking",
+                    "modelSlug": MODULE.required_model_slug("xhigh"),
                 }},
             )
             self.assertEqual(code, 0)
@@ -884,7 +887,7 @@ printf '%s\\n' 'ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseTe
                 }), encoding="utf-8")
                 recover = mock.MagicMock(return_value={
                     "ok": True, "responseText": "answer", "finished": True, "idMatched": True,
-                    "conversationUrl": "https://chatgpt.com/c/6abb5830", "modelSlug": "gpt-5-6-thinking",
+                    "conversationUrl": "https://chatgpt.com/c/6abb5830", "modelSlug": MODULE.required_model_slug("xhigh"),
                 })
                 with mock.patch.object(MODULE, "ensure_aside_daemon", return_value=None), mock.patch.object(
                     MODULE, "locate_outpost_turn", return_value=(state, located)
@@ -1126,7 +1129,7 @@ print('ASIDE_REPL_SUBMIT_UNKNOWN {"quality":"pro","reason":"commit unverified"}'
             fake = root / "aside"
             fake.write_text(
                 """#!/usr/bin/env python3
-print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"최신","tier":"Pro (5 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1","targetId":"target"}')
+print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"GPT-6","tier":"Pro (5 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1","targetId":"target"}')
 print("response phase failed")
 """,
                 encoding="utf-8",
@@ -1172,7 +1175,7 @@ print("response phase failed")
             fake = root / "aside"
             fake.write_text(
                 """#!/usr/bin/env python3
-print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"최신","tier":"Pro (5 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1","targetId":"target"}')
+print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"GPT-6","tier":"Pro (5 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1","targetId":"target"}')
 print("response phase failed")
 """,
                 encoding="utf-8",
@@ -1216,7 +1219,7 @@ print("response phase failed")
                 f"""#!/usr/bin/env python3
 import pathlib
 pathlib.Path({str(temporary_artifact)!r}).write_bytes(b"not a zip")
-print('ASIDE_REPL_SUBMIT_RESULT {{"quality":"pro","model":"최신","tier":"Pro (5 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1","targetId":"target"}}')
+print('ASIDE_REPL_SUBMIT_RESULT {{"quality":"pro","model":"GPT-6","tier":"Pro (5 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1","targetId":"target"}}')
 print('ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseText":"ID: placeholder","artifact":{{"temporaryPath":{json.dumps(str(temporary_artifact))},"suggestedFilename":"downloaded.zip"}},"responseElapsedMs":5678,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/1"}}')
 """,
                 encoding="utf-8",
@@ -1260,7 +1263,7 @@ print('ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseText":"ID: 
                         "id": "abc123",
                         "topic": "Test topic",
                         "quality": "pro",
-                        "model": "최신",
+                        "model": "GPT-6",
                         "tier": "Pro (5 of 5)",
                         "conversationUrl": "https://chatgpt.com/c/1",
                         "targetId": "target",
@@ -1438,7 +1441,7 @@ print('ASIDE_REPL_RESPONSE_RESULT {{"modelSlug":"gpt-6-pro","responseText":"ID: 
             fake = root / "aside"
             fake.write_text(
                 """#!/usr/bin/env python3
-print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"최신","tier":"매우 높음 (4 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/c/6a95625e-1f78-83e8-aa90-a49f982e36ef","targetId":"target"}')
+print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"GPT-6","tier":"매우 높음 (4 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/c/6a95625e-1f78-83e8-aa90-a49f982e36ef","targetId":"target"}')
 print('ASIDE_REPL_RESPONSE_RESULT {"modelSlug":"gpt-6-pro","responseText":"answer","idMatched":false,"packetUnread":false,"responseElapsedMs":5678,"conversationUrl":"https://chatgpt.com/c/6a95625e-1f78-83e8-aa90-a49f982e36ef"}')
 """,
                 encoding="utf-8",
@@ -1518,7 +1521,7 @@ print('ASIDE_REPL_RESPONSE_RESULT {"modelSlug":"gpt-6-pro","responseText":"answe
             fake = root / "aside"
             fake.write_text(
                 """#!/usr/bin/env python3
-print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"최신","tier":"매우 높음 (4 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/6a99ef53-3d80-83ee-a84c-187e4a415929","targetId":"target"}')
+print('ASIDE_REPL_SUBMIT_RESULT {"quality":"pro","model":"GPT-6","tier":"매우 높음 (4 of 5)","submitElapsedMs":1234,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/c/6a99ef53-3d80-83ee-a84c-187e4a415929","targetId":"target"}')
 print('ASIDE_REPL_RESPONSE_RESULT {"modelSlug":"gpt-6-pro","responseText":"answer","idMatched":true,"packetUnread":false,"responseElapsedMs":25,"conversationUrl":"https://chatgpt.com/g/g-p-test-work/project"}')
 """,
                 encoding="utf-8",

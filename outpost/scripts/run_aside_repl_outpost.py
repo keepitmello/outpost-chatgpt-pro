@@ -87,22 +87,21 @@ STAGE_HINTS = {
     "read-tier": "추론 단계 읽기",
     "pick-tier": "추론 단계 고르기",
     "open-model-menu": "모델 선택 메뉴",
-    "verify-model": "최신 모델 라디오",
+    "verify-model": "GPT-6 모델 라디오",
     "fill-composer": "입력창 채우기",
     "attach-packet": "패킷 첨부",
     "ready-to-send": "보내기 버튼",
     "commit-user-turn": "제출",
 }
-FORBIDDEN_MODEL_RADIOS = ("GPT-5.6 Sol", "5.6 Sol")
-# The only model an outpost turn may run on. The picker label is a moving
-# alias, so the run is judged by the slug ChatGPT reports for the answer.
+# The picker selects the pinned GPT-6 family; the answer's backend slug
+# independently verifies the exact model used for the requested tier.
 # Each quality is one tier pick, and each tier runs one model. ChatGPT reports
 # the slug it actually ran, so a run checks that slug against the tier it asked
-# for. `pro` is the paid GPT-6 tier; `xhigh` is ChatGPT's `Extra High`, which runs
-# GPT-5.6 — cheaper to spend, and never what a Pro packet should be answered by.
+# for. Both qualities are pinned to GPT-6; `xhigh` is the cheaper Thinking tier,
+# never what a Pro packet should be answered by.
 QUALITY_MODEL_SLUGS: dict[str, str] = {
     "pro": "gpt-6-pro",
-    "xhigh": "gpt-5-6-thinking",
+    "xhigh": "gpt-6-thinking",
 }
 QUALITIES = tuple(QUALITY_MODEL_SLUGS)
 WRONG_MODEL_EXIT = 78
@@ -2262,7 +2261,7 @@ def run_repl_outpost(
             assert located is not None
             submit_payload = {
                 "quality": "",
-                "model": "최신",
+                "model": "GPT-6",
                 "tier": "",
                 "conversationUrl": located["conversationUrl"],
                 "conversationId": located.get("conversationId") or "",

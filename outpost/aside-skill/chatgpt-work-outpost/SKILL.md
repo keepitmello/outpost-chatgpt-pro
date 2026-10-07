@@ -62,7 +62,7 @@ Known project-home path:
 Both qualities require:
 
 - Surface: **Chat**
-- Model: **최신** checked
+- Model: **GPT-6** checked
 
 Quality mapping on the Chat slider (`Instant` `Medium` `High` `Extra High` `Pro`):
 
@@ -79,7 +79,7 @@ Known picker path:
    the label is `Pro`.
 4. Require that label at `N개 중 M번째`. Do not keep probing after that label.
 5. Only after the tier is verified, open `모델 선택` and require the checked
-   radio `최신`. Click it if visible and unchecked. Do not select `GPT-5.6 Sol`.
+   radio `GPT-6`. Click it if visible and unchecked. Do not select another family.
 6. Press `Escape` to close the picker. Do not try to navigate back from the
    model submenu to the simple tier view.
 
@@ -116,7 +116,7 @@ ASIDE_WORK_OUTPOST_RESULT
 ID: <exact ID>
 SURFACE: Chat
 QUALITY: pro
-MODEL: 최신
+MODEL: GPT-6
 TIER: Pro (N of M)
 RESPONSE_BEGIN
 <exact ChatGPT response including its ID>
@@ -130,7 +130,7 @@ ASIDE_WORK_OUTPOST_RESULT
 ID: <exact ID>
 SURFACE: Chat
 QUALITY: pro
-MODEL: 최신
+MODEL: GPT-6
 TIER: Pro (N of M)
 RESPONSE_BEGIN
 <exact ChatGPT response including its ID>

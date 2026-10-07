@@ -30,7 +30,7 @@ HEAL_MAX_TRIES = 12
 # A reply normally takes 20-60 s; a call that runs longer has stalled, and the
 # loop's next try is cheaper than waiting it out.
 HEAL_TIMEOUT_SECONDS = 120
-FORBIDDEN_MODEL_RADIOS = ("GPT-5.6 Sol", "5.6 Sol")
+ALLOWED_MODEL_RADIOS = ("GPT-6",)
 
 # kind: css = CSS selectors tried together; names = accessible names tried in
 # order; labels = slider stop names per quality; text = one string.
@@ -53,7 +53,7 @@ UI_KEYS: dict[str, tuple[str, str]] = {
     ),
     "tierLabels": ("labels", "slider stop name per quality: pro -> the Pro stop, xhigh -> the stop just below Pro"),
     "modelMenuNames": ("names", "accessible name of the menuitem that opens the model submenu"),
-    "modelRadio": ("text", "menuitemradio text of the model to check (the newest model)"),
+    "modelRadio": ("text", "menuitemradio text of the pinned GPT-6 family"),
     "fileInput": ("css", "<input type=file> of the composer that accepts any file (not images only)"),
     "sendButton": ("css", "the composer send (submit) button; an enabled-state filter is appended by code"),
     "stopButton": ("css", "button shown while a reply is streaming"),
@@ -104,7 +104,7 @@ DEFAULT_UI_MAP: dict[str, Any] = {
     "tierPositionPattern": r'(?<label>[^\n"]+), (?<total>\d+)개 중 (?<index>\d+)번째',
     "tierLabels": {"pro": ["Pro"], "xhigh": ["Extra High", "매우 높음"]},
     "modelMenuNames": ["모델 선택"],
-    "modelRadio": "최신",
+    "modelRadio": "GPT-6",
     "fileInput": [
         "#upload-files",
         'form input[type="file"]:not([accept])',
@@ -179,7 +179,7 @@ def validate_overlay(raw: Any) -> tuple[dict[str, Any], list[str]]:
                 errors.append(f"{key} must be a non-empty string")
                 continue
             text = value.strip()
-            if key == "modelRadio" and any(bad in text for bad in FORBIDDEN_MODEL_RADIOS):
+            if key == "modelRadio" and text not in ALLOWED_MODEL_RADIOS:
                 errors.append(f"modelRadio may not be {text}")
                 continue
             if key == "tierPositionPattern":

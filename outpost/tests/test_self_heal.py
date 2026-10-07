@@ -45,12 +45,24 @@ class Isolated(unittest.TestCase):
 
 
 class ScreenMapTest(Isolated):
+    def test_healing_cannot_redirect_to_a_legacy_or_future_family(self) -> None:
+        for label in ("Legacy Sol", "GPT-5 Thinking", "GPT-7", "GPT-60", "최신", "Latest"):
+            with self.subTest(label=label):
+                clean, errors = UI.validate_overlay({"modelRadio": label})
+                self.assertEqual(clean, {})
+                self.assertTrue(errors)
+        for label in UI.ALLOWED_MODEL_RADIOS:
+            with self.subTest(label=label):
+                clean, errors = UI.validate_overlay({"modelRadio": label})
+                self.assertEqual(clean["modelRadio"], label)
+                self.assertEqual(errors, [])
+
     def test_a_learned_name_is_tried_first_and_the_old_ones_still_work(self) -> None:
-        UI.write_overlay({"tierSliderNames": ["Power"], "modelRadio": "Latest"})
+        UI.write_overlay({"tierSliderNames": ["Power"], "modelRadio": UI.DEFAULT_UI_MAP["modelRadio"]})
         ui = UI.load_ui_map()
         self.assertEqual(ui["tierSliderNames"][0], "Power")
         self.assertIn("파워", ui["tierSliderNames"])
-        self.assertEqual(ui["modelRadio"], "Latest")
+        self.assertEqual(ui["modelRadio"], UI.DEFAULT_UI_MAP["modelRadio"])
         script = ENGINE.build_repl_script(
             project_url=PROJECT,
             quality="pro",
@@ -61,13 +73,13 @@ class ScreenMapTest(Isolated):
             response_timeout_ms=1000,
         )
         self.assertIn('var tierSliderNames = ["Power", "파워"', script)
-        self.assertIn('var targetModel = "Latest"', script)
+        self.assertIn(f'var targetModel = "{UI.DEFAULT_UI_MAP["modelRadio"]}"', script)
 
     def test_the_map_refuses_what_would_spend_pro_or_pick_sol(self) -> None:
         clean, errors = UI.validate_overlay(
             {
                 "tierLabels": {"xhigh": ["Pro"], "pro": ["Pro"]},
-                "modelRadio": "GPT-5.6 Sol",
+                "modelRadio": "Legacy Sol",
                 "tierPositionPattern": "(\\d+) of (\\d+)",
                 "madeUp": ["x"],
             }
@@ -76,11 +88,11 @@ class ScreenMapTest(Isolated):
         self.assertEqual(len(errors), 4)
 
     def test_a_heal_killed_mid_check_leaves_the_last_verified_map(self) -> None:
-        UI.write_overlay({"modelRadio": "최신", "tierSliderNames": ["Unverified"]})
+        UI.write_overlay({"modelRadio": "GPT-6", "tierSliderNames": ["Unverified"]})
         UI._pending_path(self.map_path).write_text(
-            json.dumps({"pid": 999999999, "verified": {"modelRadio": "최신"}}), encoding="utf-8"
+            json.dumps({"pid": 999999999, "verified": {"modelRadio": "GPT-6"}}), encoding="utf-8"
         )
-        self.assertEqual(UI.read_overlay(), {"modelRadio": "최신"})
+        self.assertEqual(UI.read_overlay(), {"modelRadio": "GPT-6"})
         self.assertFalse(UI._pending_path(self.map_path).exists())
 
     def test_a_broken_saved_map_falls_back_to_the_defaults(self) -> None:
@@ -199,7 +211,7 @@ class DoctorTest(Isolated):
 
     def test_the_live_check_is_an_xhigh_send_judged_by_the_model_that_answered(self) -> None:
         submit = {"quality": "xhigh", "tier": "Extra High (4 of 5)", "conversationUrl": "https://chatgpt.com/c/6ab8fe36-8580-83e8-97d3-9a07319a4d75"}
-        for slug, ok in (("gpt-5-6-thinking", True), ("gpt-6-pro", False)):
+        for slug, ok in ((ENGINE.required_model_slug("xhigh"), True), (ENGINE.required_model_slug("pro"), False), ("legacy-thinking", False)):
             response = {"idMatched": True, "modelSlug": slug, "responseElapsedMs": 1000}
             with mock.patch.object(ENGINE, "build_repl_script", return_value="s") as build, \
                     mock.patch.object(ENGINE, "run_repl_outpost", return_value=(submit, response, 1.0, 1.0, "")), \
@@ -243,7 +255,7 @@ class SendAutoHealTest(Isolated):
 
     UNSENT = RuntimeError("exit 75\nError: OUTPOST_FAIL stage=select-tier tier button not visible")
     DONE = (
-        {"quality": "pro", "model": "최신", "tier": "Pro (5 of 5)", "conversationUrl": "https://chatgpt.com/c/6ab8fe36-8580-83e8-97d3-9a07319a4d75", "targetId": "t", "submitElapsedMs": 1000},
+        {"quality": "pro", "model": "GPT-6", "tier": "Pro (5 of 5)", "conversationUrl": "https://chatgpt.com/c/6ab8fe36-8580-83e8-97d3-9a07319a4d75", "targetId": "t", "submitElapsedMs": 1000},
         {"responseText": "answer", "idMatched": True, "modelSlug": "gpt-6-pro", "responseElapsedMs": 1000},
         1.0,
         1.0,

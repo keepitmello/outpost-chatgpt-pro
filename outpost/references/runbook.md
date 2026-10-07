@@ -13,9 +13,9 @@ There is no automatic alternate sender.
   select the ChatGPT project. `~/.codex/consult.env` and `CONSULT_*` still
   load when the new names are absent. The name is the visible project title, used as
   `{name}의 새 채팅` (older UI: `{name}에서 새 채팅`). Default name is `Work` when unset.
-- `--quality` is one of `pro` (ChatGPT's `Pro` tier with `최신`, answers as
+- `--quality` is one of `pro` (ChatGPT's `Pro` tier with `GPT-6`, answers as
   `gpt-6-pro`) or `xhigh` (ChatGPT's `Extra High`, answers as
-  `gpt-5-6-thinking`).
+  `gpt-6-thinking`).
 - The packet is self-contained and safe to disclose to Aside and ChatGPT.
 - The packet's first line is one concise Markdown H1 containing only the subject
   title (`# <title>`). The calling main session owns it; the runner extracts it
@@ -48,12 +48,12 @@ outpost doctor --json
 Doctor checks the send path twice:
 
 1. **Pro rehearsal.** The send's own `build_repl_script(dry_run=True)` with a
-   throwaway packet: open the project, select the `Pro` stop and `최신`, fill
+   throwaway packet: open the project, select the `Pro` stop and `GPT-6`, fill
    the composer, attach, wait for an enabled send button, then clear the draft
    and stop. No Pro turn is spent.
 2. **xhigh send.** A real throwaway packet on `xhigh` (not quota-limited): click,
    commit, and read the answer back through the backend. It passes when the
-   answer echoes the ID and the backend reports `gpt-5-6-thinking`. The
+   answer echoes the ID and the backend reports `gpt-6-thinking`. The
    conversation is hidden afterwards.
 
 It reports the daemon first (`daemon up=… pid=…`). Aside's app restarts every
@@ -261,19 +261,19 @@ For `--quality pro`, require:
 ```text
 quality: pro
 surface: Chat
-model: 최신
+model: GPT-6
 tier: Pro (N of M)
 modelSlug: gpt-6-pro
 submitElapsedSeconds: <120
 ```
 
 For `--quality xhigh`, the same shape with `tier: Extra High (N of M)` and
-`modelSlug: gpt-5-6-thinking`.
+`modelSlug: gpt-6-thinking`.
 
 Switch to Chat before the picker. Work mode is not a outpost surface. The
 current names of the banner toggle, the tier pill, the slider and its stops
 live in the screen map. Match the requested stop; do not operate the Work-mode
-picker; never `GPT-5.6 Sol`.
+picker; never select a legacy model.
 
 Reject an unverified model or tier, an empty assistant body, or a
 submission at or above 120 seconds. A missing ID echo in the assistant
@@ -308,9 +308,9 @@ the conversation URL). The live ChatGPT page is only a secondary signal.
 
 ## Model is judged by the server, not the picker
 
-The picker label (`최신`) is a moving alias, and the tier list is model
+The picker family is pinned to `GPT-6`, and the tier list is model
 specific. Each quality expects exactly one slug, from `QUALITY_MODEL_SLUGS` in
-the runner: `pro` -> `gpt-6-pro`, `xhigh` -> `gpt-5-6-thinking`. After the reply
+the runner: `pro` -> `gpt-6-pro`, `xhigh` -> `gpt-6-thinking`. After the reply
 is read, the runner takes `metadata.model_slug` from the ChatGPT backend and
 stores it as `modelSlug` in `result.json`. A different slug still saves
 `response.md` but exits `78`; the answer is not what the quality asked for.
@@ -327,7 +327,7 @@ Two more limits sit on top of that, and both fail silently:
   matches with no error. The tier pill and the model radio were both probed
   this way, so every send died at `select-tier` while `doctor` stayed green.
 - **Only the `aria-label` counts as a name.** An element named by its own text
-  — the Pro pill (`6 Pro`), the model radios (`최신`) — is invisible to it.
+  — the Pro pill (`6 Pro`), the model radios (`GPT-6`) — is invisible to it.
 
 String names go through `waitRole()`. Pattern names and text-named elements go
 through `waitNamedRef()`, which reads the computed name off the `snapshot()`
